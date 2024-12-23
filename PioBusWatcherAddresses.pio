@@ -1,0 +1,15 @@
+.program BusWatcherAddresses
+
+.define public irq_number_sm_sync 4
+
+.wrap_target
+start:
+in null, 16 ; load 0 for address MSB
+
+wait 1 irq irq_number_sm_sync; wait for bus access SM to notify me
+
+in pins, 16; read address from pins
+
+push block; send the address to the core
+
+.wrap

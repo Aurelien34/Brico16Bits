@@ -1,0 +1,46 @@
+.program BusAccess
+
+.side_set 2
+
+.define public bus_size_data 16
+.define public bus_size_address (bus_size_data + 1)
+.define public bus_size_address_complement (32-bus_size_address)
+.define public gpio_access 22
+
+.define ss_address 0b10
+.define ss_data 0b01
+.define ss_none 0b11
+
+.define public irq_number_sm_sync 4
+
+; Necessary only for readings with slow buffers => OK with 5 cycles at 250MHz, 4 cycles for 225MHz, 3 for 200MHz
+.define public delay_address_stabilization 0
+
+pull block side ss_address ; read base ROM image address
+mov y,osr side ss_address ; store it to y
+wait 1 gpio gpio_access side ss_address; wait for system power on (0 before power on)
+
+.wrap_target
+
+in y, bus_size_address_complement side ss_address; preload high address bits based on the base ROM address previously stored in Y (in shift is reversed)
+wait 0 gpio gpio_access side ss_address [delay_address_stabilization]; wait for ROM access
+in pins, bus_size_address side ss_address; read low address from pins
+
+push side ss_address; Send address to DMA
+
+irq set irq_number_sm_sync side ss_data; trigger the bus watcher
+
+; Change bus direction => output
+mov osr, ~null side ss_address ; set osr to 0xffffffff
+out pindirs, bus_size_data side ss_address ; set pindirection based on osr
+
+pull block side ss_data; wait for DMA to send back data
+
+out pins, bus_size_data side ss_data ; send the osr directly to the pins
+
+wait 1 gpio gpio_access side ss_data; wait for ROM access to stop
+
+mov osr, null side ss_none ; set osr to 0x00000000
+out pindirs, bus_size_data side ss_none ; set pindirection based on osr
+
+.wrap

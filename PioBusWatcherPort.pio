@@ -1,0 +1,39 @@
+.program BusWatcherPort
+
+.define public irq_number_sm_sync 4
+.define public irq_number_notify_core 0
+
+pull block; read address to watch
+; osr contains port value
+
+.wrap_target
+start:
+in null, 16 ; load 0 for address MSB
+
+wait 1 irq irq_number_sm_sync; wait for bus access SM to notify me
+
+in pins, 16; read address from pins
+
+mov x, isr; copy address to scratch x
+
+mov y,osr; get port address from osr backup
+jmp x!=y port_not_detected; compare address to the reference one
+
+port_detected:
+; wait for the next address access and send address to the core
+in null, 16 ; load 0 for address MSB
+wait 1 irq irq_number_sm_sync; wait for bus access SM to notify me
+wait 1 irq irq_number_sm_sync; wait for bus access SM to notify me
+in pins, 16; read address from pins
+push block; send the address to the core
+jmp start
+
+port_not_detected:
+;jmp y-- detect_trigger_parity; decrement port value to get trigger value
+;detect_trigger_parity:
+jmp y-- detect_trigger; decrement port value to get trigger value
+detect_trigger:
+jmp x!=y start; compare address to the reference one
+trigger_detected:
+irq nowait 0; alert the core using an irq
+.wrap
