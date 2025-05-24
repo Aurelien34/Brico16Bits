@@ -3,6 +3,7 @@
 #include "PioBusAccess.pio.h"
 #include "PioBusWatcherPort.pio.h"
 #include "PioBusWatcherAddresses.pio.h"
+#include "PioFrequencyCounter.pio.h"
 
 #define PIO_DATA_INPUT_EOT_IRQ (BusWatcherPort_irq_number_notify_core)
 

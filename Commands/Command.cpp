@@ -27,7 +27,7 @@ int Command::GetParametersCount() const
     return count;
 }
 
-void Command::GetSectionInfo(Command::CommandSection section, char *sectionName, char *sectionDescription)
+void Command::GetSectionInfo(Command::CommandSection section, char *sectionName, char *sectionDescription) const
 {
     switch (section)
     {

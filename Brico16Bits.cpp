@@ -4,6 +4,7 @@
 #include <tusb.h>
 #include <pico/multicore.h>
 #include <hardware/structs/pio.h>
+#include <hardware/clocks.h>
 
 #include "PinDefinitions.h"
 #include "DMAManager.h"
@@ -30,9 +31,8 @@ int main()
     // Start on the ROM image in bank 0 by default (using DMA initialized above)
     ROMImageManager::GetFromFlashAsyncStart(FLASH_ROM_BANK_DEFAULT);
 
-    // Init state machines
+    // Init EPROM mode state machines
     PIOManager::InitBusPIO();
-
     PIOManager::InitBusReaderStateMachine();
     PIOManager::InitBusWatcherStateMachine(PIOManager::BusWatcherType::Port);
 
@@ -46,6 +46,10 @@ int main()
     PIOManager::PushImageAddress(ROMImageManager::GetImageBaseAddressDW());
 
     // From here, the board is behaving as an EPROM!!!
+
+    // Init frequency counter state machine
+    PIOManager::InitFrequencyCounterPIO();
+    PIOManager::InitFrequencyCounterReaderStateMachine();
 
     // Init input port DMA channels
     DMAManager::InitChannelBusWatcher(InputBuffer::GetBufferAddress());

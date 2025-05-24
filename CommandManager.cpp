@@ -13,6 +13,7 @@
 #include "Commands/Command.h"
 #include "Commands/CommandBankLoadBank.h"
 #include "Commands/CommandBankStoreBank.h"
+#include "Commands/CommandSetRomWord.h"
 #include "Commands/CommandSendROM.h"
 #include "Commands/CommandSendROMPart.h"
 #include "Commands/CommandReadWord.h"
@@ -20,9 +21,11 @@
 #include "Commands/CommandClearBuffer.h"
 #include "Commands/CommandTrace.h"
 #include "Commands/CommandFree.h"
+#include "Commands/CommandFreq.h"
 #include "Commands/CommandFsDir.h"
 #include "Commands/CommandReset.h"
 #include "Commands/CommandBootSel.h"
+#include "Commands/CommandDebug.h"
 #include "Commands/CommandComment.h"
 #include "Commands/CommandDelay.h"
 
@@ -39,11 +42,11 @@
 // Colors can be found here: https://tintin.mudhalla.net/info/256color/
 #define COLOR_INDEX_NORMAL              7
 #define COLOR_INDEX_COMMAND_NAME        12
-#define COLOR_INDEX_COMMAND_PARAMETERS  10
+#define COLOR_INDEX_COMMAND_PARAMETERS  5
 #define COLOR_INDEX_COMMAND_DESCRIPTION 7
 #define COLOR_INDEX_PROMPT              13
 #define COLOR_INDEX_ERROR               9
-#define COLOR_INDEX_RETURN_MESSAGES     11
+#define COLOR_INDEX_RETURN_MESSAGES     10
 #define COLOR_INDEX_SECTION_NAME        14
 #define COLOR_INDEX_COMMENT             2
 
@@ -53,11 +56,13 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
     []() -> Command * { return new CommandBootSel(); },
     []() -> Command * { return new CommandComment(); },
     []() -> Command * { return new CommandDelay(); },
+    []() -> Command * { return new CommandDebug(); },
     // ROM management
     []() -> Command * { return new CommandSendROM(); },
     []() -> Command * { return new CommandSendROMPart(); },
     []() -> Command * { return new CommandBankLoadBank(); },
     []() -> Command * { return new CommandBankStoreBank(); },
+    []() -> Command * { return new CommandSetRomWord(); },
     // Output
     []() -> Command * { return new CommandReadWord(); },
     []() -> Command * { return new CommandReadWords(); },
@@ -65,6 +70,7 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
     // System
     []() -> Command * { return new CommandTrace(); },
     []() -> Command * { return new CommandFree(); },
+    []() -> Command * { return new CommandFreq(); },
     []() -> Command * { return new CommandFsDir(); },
     []() -> Command * { return new CommandReset(); },
 };
@@ -95,6 +101,7 @@ Command * CommandManager::GetCommand(int commandIndex)
         // Initialize the command
         pCmd->SetLastCommandDataCRC(0xffffffff);
         pCmd->SetLoopMode(false);
+        pCmd->SetOutputBinaryMode(false);
     }
     return pCmd;
 }
@@ -169,9 +176,12 @@ char CommandManager::GetCharBlocking()
 void CommandManager::ResetCommand()
 {
     gcCurrentCommand[0] = 0;
-    SetColorForeground(COLOR_INDEX_PROMPT);
-    printf("> ");
-    SetColorForeground(COLOR_INDEX_NORMAL);
+    if (IsTerminalConnected())
+    {
+        SetColorForeground(COLOR_INDEX_PROMPT);
+        printf("> ");
+        SetColorForeground(COLOR_INDEX_NORMAL);
+    }
 }
 
 void CommandManager::ShowPrompt()
@@ -202,12 +212,17 @@ void CommandManager::ShowPrompt()
     printf("/_____/_/  /_/\\___/\\____/_/ |_/\\___/\\____/ \n");
     printf("\n");
     printf("\n");
-    SetColorForeground(COLOR_INDEX_NORMAL);  
     ShowCommandsList();
 }
 
 void CommandManager::ShowCommandsList()
 {
+    SetColorForeground(COLOR_INDEX_NORMAL);  
+    printf("Type ");
+    SetColorForeground(COLOR_INDEX_COMMAND_PARAMETERS);
+    printf("?");
+    SetColorForeground(COLOR_INDEX_NORMAL);
+    printf(" to see available commands again.\n");
     printf("Type ");
     SetColorForeground(COLOR_INDEX_COMMAND_PARAMETERS);
     printf("*");
@@ -430,25 +445,35 @@ void CommandManager::ReadCommands()
             {
                 // Validate command
 
-                // Dirty: handle comments colorization after they have been validated
-                if (strncmp(gcCurrentCommand, COMMAND_NAME_COMMENT, strlen(COMMAND_NAME_COMMENT)) == 0)
+                // Display command list again?
+                if (strcmp(gcCurrentCommand, "?") == 0)
                 {
-                    // Erase current command
-                    int length = strlen(gcCurrentCommand);
-                    for (;length > 0; --length)
+                    printf("\n\n");
+                    ShowCommandsList();
+                    ResetCommand();
+                }
+                else
+                {
+                    // Dirty: handle comments colorization after they have been validated
+                    if (strncmp(gcCurrentCommand, COMMAND_NAME_COMMENT, strlen(COMMAND_NAME_COMMENT)) == 0)
                     {
-                        putchar_raw(0x08); // Backspace
+                        // Erase current command
+                        int length = strlen(gcCurrentCommand);
+                        for (;length > 0; --length)
+                        {
+                            putchar_raw(0x08); // Backspace
+                        }
+                        SetColorForeground(COLOR_INDEX_COMMENT);
+                        printf(gcCurrentCommand);
+                        SetColorForeground(COLOR_INDEX_NORMAL);
                     }
-                    SetColorForeground(COLOR_INDEX_COMMENT);
-                    printf(gcCurrentCommand);
-                    SetColorForeground(COLOR_INDEX_NORMAL);
-                }
 
-                if (IsTerminalConnected())
-                {
-                    printf("\n");
+                    if (IsTerminalConnected())
+                    {
+                        printf("\n");
+                    }
+                    CommandRequest();
                 }
-                CommandRequest();
             }
         }
     }
@@ -477,6 +502,13 @@ void CommandManager::CommandRequest()
     if (bAutoRepeatRefresh)
     {
         // Skip the star
+        ++pCommandStart;
+    }
+
+    bool bOutputBinaryMode = (pCommandStart[0] == '@');
+    if (bOutputBinaryMode)
+    {
+        // Skip the marker
         ++pCommandStart;
     }
 
@@ -550,16 +582,23 @@ void CommandManager::CommandRequest()
                     }
                     if (bParamCountOK)
                     {
+                        // Set additional command parameters
+                        cmd->SetOutputBinaryMode(bOutputBinaryMode);
+
                         // Try to execute the command
                         char pcReturnMessage[MAX_LENGTH_RETURN_MESSAGE + 1] = "";
                         pcReturnMessage[0] = 0;
                         bool bResult = true;
                         bool bResultChanged = true;
+                        uint32_t nAutoRepeatLoopCount = 0;
                         uint32_t previousCommandDataCRC = 0xffffffff;
                         cmd->SetLastCommandDataCRC(previousCommandDataCRC);
                         cmd->SetLoopMode(bAutoRepeatRefresh);
                         char c;
-                        SetColorForeground(COLOR_INDEX_RETURN_MESSAGES);
+                        if (IsTerminalConnected())
+                        {
+                            SetColorForeground(COLOR_INDEX_RETURN_MESSAGES);
+                        }
                         while (bResult & !(bAutoRepeat && GetChar(&c)))
                         {
                             bResult = cmd-> Execute(pcReturnMessage, MAX_LENGTH_RETURN_MESSAGE, pcParam1, pcParam2, pcParam3);
@@ -578,18 +617,30 @@ void CommandManager::CommandRequest()
                                     // Result changed
                                     // Update CRC
                                     previousCommandDataCRC = cmd->GetLastCommandDataCRC();
+                                    ++nAutoRepeatLoopCount;
+                                    cmd->SetLoopCount(nAutoRepeatLoopCount);
                                 }
                                 if (pcReturnMessage[0] != 0 && (!bAutoRepeatRefresh || bResultChanged))
                                 {
+                                    if (bAutoRepeatRefresh)
+                                    {
+                                        CommandManager::HideCursor();
+                                        CommandManager::ClearTerminal();
+                                        printf("Loop count: %d\n\n", nAutoRepeatLoopCount);
+                                    }
                                     printf(pcReturnMessage);
                                     printf("\n");
+                                    if (bAutoRepeatRefresh)
+                                    {
+                                        CommandManager::ShowCursor();
+                                    }
                                 }
                                 // Switch back to normal color
                             }
 
                             if (bAutoRepeat)
                             {
-                                // Do USB porcessing to handle serial line and mass storage events
+                                // Do USB processing to handle serial line and mass storage events
                                 MassStorageManager::Loop();
                             }
                             else
@@ -598,13 +649,16 @@ void CommandManager::CommandRequest()
                                 break;
                             }
                         }
-                        SetColorForeground(COLOR_INDEX_NORMAL);
+                        if (IsTerminalConnected())
+                        {
+                            SetColorForeground(COLOR_INDEX_NORMAL);
+                        }
                     }
                     else
                     {
                         // Wrong parameters count
                         SetColorForeground(COLOR_INDEX_ERROR);
-                        printf("Wrong paramers count. Expected %d\n", expectedParamCount);
+                        printf("Wrong parameters count. Expected %d\n", expectedParamCount);
                         SetColorForeground(COLOR_INDEX_NORMAL);
                     }
                     // Stop searching commands

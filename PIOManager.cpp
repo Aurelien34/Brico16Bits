@@ -7,9 +7,7 @@
 
 #define WATCHDOG_RESET_TIME_MILLISECONDS 500
 
-//#define DEFAULT_OUTPUT_PORT_ADDRESS 0x1FFFE
 #define DEFAULT_OUTPUT_PORT_ADDRESS 0x1FF02
-//#define DEFAULT_OUTPUT_PORT_ADDRESS 0x8000
 
 uint PIOManager::guiBusWatcherProgramOffset = 0xffffffff;
 const pio_program *PIOManager::gpInstalledWatherProgram = NULL;
@@ -115,4 +113,62 @@ void PIOManager::ForceWatchdogReset()
 
     // Start the state machine
     pio_sm_set_enabled(PIO_BUS_READER, STATE_MACHINE_BUS_READER, true);
+}
+
+
+void PIOManager::InitFrequencyCounterPIO()
+{
+    // Set pin's GPIO function (connect PIO to the pad)
+    gpio_init(PIN_EXTENDED_IN);
+    gpio_set_dir(PIN_EXTENDED_IN, GPIO_IN);
+    pio_gpio_init(PIO_FREQUENCY_COUNTER, PIN_EXTENDED_IN);
+}
+
+void PIOManager::InitFrequencyCounterReaderStateMachine()
+{
+    // Stop the state machine
+    pio_sm_set_enabled(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, false);
+
+    // Set pins function
+    uint programOffset = pio_add_program(PIO_FREQUENCY_COUNTER, &FrequencyCounter_program);
+    pio_sm_config config = FrequencyCounter_program_get_default_config(programOffset);
+    sm_config_set_jmp_pin(&config, PIN_EXTENDED_IN);
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, programOffset, &config);
+
+    // Force pin directions
+    pio_sm_set_consecutive_pindirs(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, PIN_EXTENDED_IN, 1, false); // Input
+}
+
+uint32_t PIOManager::ComputeFrequency()
+{
+    // Start the state machine
+    pio_sm_set_enabled(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, true);
+
+    uint32_t sampleCountInitial = 10000000;
+    pio_sm_put_blocking(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, sampleCountInitial);
+    uint32_t periodsCount = pio_sm_get_blocking(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER) + 1;
+
+    // Stop the state machine
+    pio_sm_set_enabled(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, true);
+
+    int sampleCount = sampleCountInitial + periodsCount;
+    int frequency = (uint32_t)(((double)periodsCount * (double)sampleCountInitial) / (double)sampleCount * 10.0 + 0.5);
+    return frequency < 100 ? 0: frequency;
+    /*
+    // Start the state machine
+    pio_sm_set_enabled(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, true);
+
+    uint32_t sampleCountInitial = 100000000;
+    pio_sm_put_blocking(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, sampleCountInitial);
+    uint32_t periodsCount = pio_sm_get_blocking(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER) + 1;
+
+    // Stop the state machine
+    pio_sm_set_enabled(PIO_FREQUENCY_COUNTER, STATE_MACHINE_FREQUENCY_COUNTER, true);
+
+    int sampleCount = sampleCountInitial + periodsCount;
+    int frequency = (uint32_t)(((double)periodsCount * (double)sampleCountInitial) / (double)sampleCount + 0.5);
+    return frequency <= 1 ? 0: frequency;
+    */
 }

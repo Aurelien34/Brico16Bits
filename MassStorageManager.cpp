@@ -218,7 +218,7 @@ void MassStorageManager::Loop()
 #ifdef USE_MASS_STORAGE
 
     // Time to eject the disk?
-    if (!ejected && timeToWaitBeforeEjection._private_us_since_boot != 0L && time_reached(timeToWaitBeforeEjection))
+    if (!ejected && timeToWaitBeforeEjection != 0L && time_reached(timeToWaitBeforeEjection))
     {
 #ifdef MASS_STORAGE_DEBUG
         printf("Ejecting volume\n");
@@ -229,7 +229,7 @@ void MassStorageManager::Loop()
         ejected = true;
     }
     // Time to (re)introduce the disk?
-    else if (ejected && timeToWaitBeforeInjection._private_us_since_boot != 0L && time_reached(timeToWaitBeforeInjection))
+    else if (ejected && timeToWaitBeforeInjection != 0L && time_reached(timeToWaitBeforeInjection))
     {
 #ifdef MASS_STORAGE_DEBUG
         printf("Reinjecting volume\n");
@@ -436,7 +436,7 @@ void MassStorageManager::FormatFileName(const uint8_t *pDirEntry, uint8_t *pTarg
 
 int32_t MassStorageManager::WriteHook(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize)
 {
-    if (ejected || timeToWaitBeforeEjection._private_us_since_boot != 0L)
+    if (ejected || timeToWaitBeforeEjection != 0L)
     {
         // Accept writes even if media has been ejected to prevent misdetections after forced ejection
         return bufsize;

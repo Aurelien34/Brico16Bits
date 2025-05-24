@@ -9,6 +9,7 @@
 
 #include "Commands68k/Command68kPrintText.h"
 #include "Commands68k/Command68kPrintHex.h"
+#include "Commands68k/Command68kSwitchBank.h"
 
 #define BUILTIN_COMMAND_COUNT (sizeof(CommandManager68k::gaBuiltInCommandConstructors)/sizeof(void *))
 
@@ -17,6 +18,7 @@ Command68k * (* CommandManager68k::gaBuiltInCommandConstructors [])() =
     // Misc
     []() -> Command68k * { return new Command68kPrintText(); },
     []() -> Command68k * { return new Command68kPrintHex(); },
+    []() -> Command68k * { return new Command68kSwitchBank(); },
 };
 
 Command68k * CommandManager68k::GetCommand(int commandIndex)

@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <cstdint>
 
 #include "BricoExtManager.h"
 #include "MemoryMap.h"

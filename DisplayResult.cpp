@@ -6,7 +6,7 @@
 
 #define DUMP_DISPLAY_LINE_WORDS_COUNT 8
 
-void DisplayResult::Show(DisplayResult::ResultType eResultType, char *returnMessage, int messageMaxSize)
+void DisplayResult::Show(DisplayResult::ResultType eResultType, char *returnMessage, int messageMaxSize, bool binaryMode)
 {
     switch (eResultType)
     {
@@ -20,7 +20,7 @@ void DisplayResult::Show(DisplayResult::ResultType eResultType, char *returnMess
         DisplayString();
         break;
     case ResultType::Dump:
-        DisplayDump();
+        DisplayDump(binaryMode);
         break;
     default:
         printf("Wrong return type sent by host (%d)\n", (int)eResultType);
@@ -62,7 +62,7 @@ void DisplayResult::DisplayString()
     printf("\n");
 }
 
-void DisplayResult::DisplayDump()
+void DisplayResult::DisplayDump(bool binaryMode)
 {
     // Read a memory dump. Start address (2 words), then a list of words
     uint16_t result;
@@ -76,7 +76,10 @@ void DisplayResult::DisplayDump()
     {
         baseAddress |= (((uint32_t)result) << 16);
     }
-    printf("Memory content starting at address 0x%06x:\n", baseAddress);
+    if (!binaryMode)
+    {
+        printf("Memory content starting at address 0x%06x:\n", baseAddress);
+    }
 
     // Reserve space for one line
     char wordLineToDisplay[DUMP_DISPLAY_LINE_WORDS_COUNT * (4 + 1) + 1];
@@ -88,70 +91,82 @@ void DisplayResult::DisplayDump()
     bool bContinue = true;
     int lastWordCount;
 
-    while (bContinue)
+    if (binaryMode)
     {
-        lastWordCount = 0;
-        int wrd = 0;
-        for (; wrd < DUMP_DISPLAY_LINE_WORDS_COUNT & bContinue; ++wrd)
+        // Binaty mode
+        while (InputBuffer::GetValue(&result))
         {
-            if (InputBuffer::GetValue(&result))
-            {
-                sprintf(wordNextCharToSet, "%04x ", result);
-                wordNextCharToSet += 5;
-
-                char c = (char)(result & 0xff);
-                charNextCharToSet[1] = ((c >= 32 && c < 128) ? c : '.' );
-                c = (char)((result >> 8)& 0xff);
-                charNextCharToSet[0] = ((c >= 32 && c < 128) ? c : '.' );
-                charNextCharToSet[2] = 0;
-                charNextCharToSet += 2;
-
-                ++lastWordCount;
-            }
-            else
-            {
-                bContinue = false;
-            }
+            stdio_put_string((const char *)&result, 2, false, false);
         }
-
-        // Something to print?
-        if (lastWordCount > 0)
+    }
+    else
+    {
+        // Terminal / Text mode
+        while (bContinue)
         {
-            // Print the address
-            printf("%06x: ", baseAddress);
-
-            // Print the words
-            printf(wordLineToDisplay);
-
-            // Stuff for potential missing parity words
-            if (!bContinue)
+            lastWordCount = 0;
+            int wrd = 0;
+            for (; wrd < DUMP_DISPLAY_LINE_WORDS_COUNT & bContinue; ++wrd)
             {
-                if (lastWordCount != DUMP_DISPLAY_LINE_WORDS_COUNT)
+                if (InputBuffer::GetValue(&result))
                 {
-                    for (int i = lastWordCount; i < DUMP_DISPLAY_LINE_WORDS_COUNT; ++i)
-                    {
-                        printf("     ");
-                    }
+                    sprintf(wordNextCharToSet, "%04x ", result);
+                    wordNextCharToSet += 5;
+
+                    char c = (char)(result & 0xff);
+                    charNextCharToSet[1] = ((c >= 32 && c < 128) ? c : '.' );
+                    c = (char)((result >> 8)& 0xff);
+                    charNextCharToSet[0] = ((c >= 32 && c < 128) ? c : '.' );
+                    charNextCharToSet[2] = 0;
+                    charNextCharToSet += 2;
+
+                    ++lastWordCount;
+                }
+                else
+                {
+                    bContinue = false;
                 }
             }
 
-            printf(" | ");
-            printf(charLineToDisplay);
-            printf("\n");
-
-            if (bContinue)
+            // Something to print?
+            if (lastWordCount > 0)
             {
-                // Rewind the line
-                wordNextCharToSet = &wordLineToDisplay[0];
-                wordLineToDisplay[0] = 0;
-                charNextCharToSet = &charLineToDisplay[0];
-                charLineToDisplay[0] = 0;
+                // Print the address
+                printf("%06x: ", baseAddress);
 
-                // Next address ot display
-                baseAddress += 2 * DUMP_DISPLAY_LINE_WORDS_COUNT;
+                // Print the words
+                printf(wordLineToDisplay);
+
+                // Stuff for potential missing parity words
+                if (!bContinue)
+                {
+                    if (lastWordCount != DUMP_DISPLAY_LINE_WORDS_COUNT)
+                    {
+                        for (int i = lastWordCount; i < DUMP_DISPLAY_LINE_WORDS_COUNT; ++i)
+                        {
+                            printf("     ");
+                        }
+                    }
+                }
+
+                printf(" | ");
+                printf(charLineToDisplay);
+                printf("\n");
+
+                if (bContinue)
+                {
+                    // Rewind the line
+                    wordNextCharToSet = &wordLineToDisplay[0];
+                    wordLineToDisplay[0] = 0;
+                    charNextCharToSet = &charLineToDisplay[0];
+                    charLineToDisplay[0] = 0;
+
+                    // Next address ot display
+                    baseAddress += 2 * DUMP_DISPLAY_LINE_WORDS_COUNT;
+                }
             }
         }
-    }
 
-    printf("\n");
+        printf("\n");
+    }
 }

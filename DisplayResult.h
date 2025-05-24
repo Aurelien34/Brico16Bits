@@ -13,9 +13,9 @@ public:
         Dump = 0x3,
     };
 
-    static void Show(ResultType eResultType, char *returnMessage, int messageMaxSize);
+    static void Show(ResultType eResultType, char *returnMessage, int messageMaxSize, bool binaryMode);
 private:
     static void DisplaySingleWord();
     static void DisplayString();
-    static void DisplayDump();
+    static void DisplayDump(bool binaryMode);
 };

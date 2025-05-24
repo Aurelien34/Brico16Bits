@@ -65,8 +65,9 @@ bool CommandExtension::Execute(char *returnMessage, int messageMaxSize, const ch
             {
                 CommandManager::HideCursor();
                 CommandManager::ClearTerminal();
+                printf("Loop count: %d\n\n", loopCount);
             }
-            DisplayResult::Show(resultType, returnMessage, messageMaxSize);
+            DisplayResult::Show(resultType, returnMessage, messageMaxSize, outputBinaryMode);
             if (IsLoopMode())
             {
                 CommandManager::ShowCursor();

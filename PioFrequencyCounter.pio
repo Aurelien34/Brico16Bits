@@ -1,0 +1,26 @@
+.program FrequencyCounter
+
+mov y,null
+pull block
+mov x,osr
+
+wait1:
+    jmp pin high1
+low1:
+    jmp x-- wait1
+    jmp end
+
+high1:
+    jmp y-- high2
+high2:
+    jmp pin high3
+    jmp x-- wait1
+    jmp end
+high3:
+    jmp x-- high2
+    jmp end
+
+end:
+    mov isr,!y
+    push block
+    .wrap

@@ -21,7 +21,6 @@
 #define PIN_SIDESET_START           PIN_ADDRESS_INPUT_ENABLE
 
 // Extended options (for later use)
-#define PIN_EXTENDED_OUT            19
 #define PIN_EXTENDED_IN             26
 #define PIN_SLOT_POWER              27 // Wired from v0.6 of the board
 

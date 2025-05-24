@@ -1,27 +1,29 @@
 project (Brico16Bits)
 
 set (COMMANDS_CPP
-    Commands/Command.cpp Commands/CommandBankLoadBank.cpp Commands/CommandBankStoreBank.cpp Commands/CommandSendROM.cpp Commands/CommandSendROMPart.cpp Commands/CommandReadWord.cpp Commands/CommandReadWords.cpp Commands/CommandTrace.cpp Commands/CommandFree.cpp Commands/CommandClearBuffer.cpp
+    Commands/Command.cpp Commands/CommandBankLoadBank.cpp Commands/CommandBankStoreBank.cpp Commands/CommandSetRomWord.cpp Commands/CommandSendROM.cpp Commands/CommandSendROMPart.cpp Commands/CommandReadWord.cpp Commands/CommandReadWords.cpp Commands/CommandTrace.cpp Commands/CommandFree.cpp Commands/CommandFreq.cpp Commands/CommandClearBuffer.cpp
     Commands/CommandFsDir.cpp Commands/CommandReset.cpp Commands/CommandDelay.cpp
-    Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandComment.cpp
+    Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandDebug.cpp Commands/CommandComment.cpp
     )
 
 set (COMMANDS_H
-    Commands/Command.h Commands/CommandBankLoadBank.h Commands/CommandBankStoreBank.h Commands/CommandSendROM.h Commands/CommandSendROMPart.h Commands/CommandReadWord.h Commands/CommandReadWords.h Commands/CommandTrace.h Commands/CommandFree.h Commands/CommandClearBuffer.h
+    Commands/Command.h Commands/CommandBankLoadBank.h Commands/CommandBankStoreBank.h Commands/CommandSetRomWord.h Commands/CommandSendROM.h Commands/CommandSendROMPart.h Commands/CommandReadWord.h Commands/CommandReadWords.h Commands/CommandTrace.h Commands/CommandFree.h Commands/CommandFreq.h Commands/CommandClearBuffer.h
     Commands/CommandFsDir.h Commands/CommandReset.h Commands/CommandDelay.h
-    Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandComment.h
+    Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandDebug.h Commands/CommandComment.h
     )
 
 set (COMMANDS_68K_CPP
     Commands68k/Command68k.cpp
     Commands68k/Command68kPrintText.cpp
     Commands68k/Command68kPrintHex.cpp
+    Commands68k/Command68kSwitchBank.cpp
     )
 
 set (COMMANDS_68K_H
     Commands68k/Command68k.h
     Commands68k/Command68kPrintText.h
     Commands68k/Command68kPrintHex.h
+    Commands68k/Command68kSwitchBank.h
     )
 
 set (SRC Brico16Bits.cpp
@@ -32,7 +34,8 @@ set (SRC Brico16Bits.cpp
     MassStorageManager.cpp
     TinyMassStorage.cpp 
     CommandManager68k.cpp
-    NeoDiagImageBuilder.cpp)
+    NeoDiagImageBuilder.cpp
+    OpcodeDecoder.cpp)
 
     set (HEADERS StateMachinesDefinitions.h MemoryMap.h
     PioBusAccess.pio.h PioBusWatcherAddresses.pio.h PioBusWatcherPort.pio.h
@@ -42,13 +45,15 @@ set (SRC Brico16Bits.cpp
     BricoExtManager.h DisplayResult.h
     MassStorageManager.h
     CommandManager68k.h
-    NeoDiagImageBuilder.h)
+    NeoDiagImageBuilder.h
+    OpcodeDecoder.h)
 
 add_executable(Brico16Bits ${SRC} ${HEADERS})
 
 pico_generate_pio_header(Brico16Bits ${CMAKE_CURRENT_LIST_DIR}/PioBusAccess.pio)
 pico_generate_pio_header(Brico16Bits ${CMAKE_CURRENT_LIST_DIR}/PioBusWatcherPort.pio)
 pico_generate_pio_header(Brico16Bits ${CMAKE_CURRENT_LIST_DIR}/PioBusWatcherAddresses.pio)
+pico_generate_pio_header(Brico16Bits ${CMAKE_CURRENT_LIST_DIR}/PioFrequencyCounter.pio)
 
 # Make sure TinyUSB can find tusb_config.h
 target_include_directories(Brico16Bits PUBLIC
@@ -96,6 +101,9 @@ add_compile_definitions(PICO_STDIO_USB_CONNECTION_WITHOUT_DTR)
 add_compile_definitions(USE_MASS_STORAGE)
 add_compile_definitions(MASS_STORAGE_DISABLE_AUTOPLAY)
 #add_compile_definitions(MASS_STORAGE_DEBUG)
+
+# Absolute time management
+#add_compile_definitions(PICO_OPAQUE_ABSOLUTE_TIME_T)
 
 # create map/bin/hex/uf2 file etc.
 pico_add_extra_outputs(Brico16Bits)
