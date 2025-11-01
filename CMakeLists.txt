@@ -109,4 +109,10 @@ add_compile_definitions(MASS_STORAGE_DISABLE_AUTOPLAY)
 pico_add_extra_outputs(Brico16Bits)
 
 # apply custom memmap to allow 128kB RAM pre-allocation and circual input buffer
-pico_set_linker_script(Brico16Bits "${CMAKE_CURRENT_LIST_DIR}/memmap_with_rom_image.ld")
+if (PICO_PLATFORM STREQUAL "rp2040")
+    pico_set_linker_script(Brico16Bits "${CMAKE_CURRENT_LIST_DIR}/memmap_with_rom_image_2040.ld")
+elseif (PICO_PLATFORM MATCHES "^rp2350")
+    pico_set_linker_script(Brico16Bits "${CMAKE_CURRENT_LIST_DIR}/memmap_with_rom_image_2350.ld")
+else()
+    message(FATAL_ERROR "PICO_PLATFORM not managed: ${PICO_PLATFORM}")
+endif()

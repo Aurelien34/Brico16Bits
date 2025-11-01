@@ -7,10 +7,16 @@ New memory map (from memmap_with_rom_image.ld)
 
 */
 
-// RP2040
+// Microcontroller
 // Base addresses are defined and reserved in the memmap linker file
+#ifdef PICO_RP2040
 #define BASE_ADDRESS_IMAGE_IN_RAM           0x20020000
-#define BASE_ADDRESS_INPUT_RING_BUFFER      0x2001F000
+#endif
+#ifdef PICO_RP2350
+#define BASE_ADDRESS_IMAGE_IN_RAM           0x20060000
+#endif
+
+#define BASE_ADDRESS_INPUT_RING_BUFFER      ((BASE_ADDRESS_IMAGE_IN_RAM)-4096)//0x2001F000
 
 // NeoGeo
 // Fix addresses in ROM
