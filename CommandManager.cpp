@@ -28,6 +28,7 @@
 #include "Commands/CommandDebug.h"
 #include "Commands/CommandComment.h"
 #include "Commands/CommandDelay.h"
+#include "Commands/CommandListRoms.h"
 
 #include "Commands/CommandExtension.h"
 
@@ -63,6 +64,7 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
     []() -> Command * { return new CommandBankLoadBank(); },
     []() -> Command * { return new CommandBankStoreBank(); },
     []() -> Command * { return new CommandSetRomWord(); },
+    []() -> Command * { return new CommandListRoms(); },
     // Output
     []() -> Command * { return new CommandReadWord(); },
     []() -> Command * { return new CommandReadWords(); },

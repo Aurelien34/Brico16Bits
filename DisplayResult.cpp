@@ -6,6 +6,53 @@
 
 #define DUMP_DISPLAY_LINE_WORDS_COUNT 8
 
+
+bool DisplayResult::DataProviderInputBuffer::GetValue(uint16_t *value)
+{
+    return InputBuffer::GetValue(value);
+}
+
+uint32_t DisplayResult::DataProviderInputBuffer::GetBaseDumpAddress()
+{
+    uint32_t baseAddress;
+    uint16_t tmpResult;
+    if(InputBuffer::GetValue(&tmpResult))
+    {
+        baseAddress = (uint32_t)tmpResult;
+    }
+    if(InputBuffer::GetValue(&tmpResult))
+    {
+        baseAddress |= (((uint32_t)tmpResult) << 16);
+    }
+    return baseAddress;
+}
+
+DisplayResult::DataProviderMemory::DataProviderMemory(uint32_t nBaseDumpAddress, uint16_t nDataLength, uint16_t *pnContent) :
+    mnBaseDumpAddress(nBaseDumpAddress),
+    mnDataRemaining(nDataLength),
+    mpnContentPtr(pnContent)
+{
+}
+
+bool DisplayResult::DataProviderMemory::GetValue(uint16_t *value)
+{
+    if (mnDataRemaining != 0)
+    {
+        *value = *(mpnContentPtr++);
+        --mnDataRemaining;
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+uint32_t DisplayResult::DataProviderMemory::GetBaseDumpAddress()
+{
+    return mnBaseDumpAddress;
+}
+
 void DisplayResult::Show(DisplayResult::ResultType eResultType, char *returnMessage, int messageMaxSize, bool binaryMode)
 {
     switch (eResultType)
@@ -64,18 +111,17 @@ void DisplayResult::DisplayString()
 
 void DisplayResult::DisplayDump(bool binaryMode)
 {
+    DisplayResult::DataProviderInputBuffer data;
+    DisplayResult::DisplayDump(binaryMode, (DisplayResult::DataProvider*)&data);
+}
+
+void DisplayResult::DisplayDump(bool binaryMode, DisplayResult::DataProvider *pDataProvider)
+{
     // Read a memory dump. Start address (2 words), then a list of words
     uint16_t result;
     uint32_t baseAddress = 0;
     uint32_t uCRC = (uint32_t)(-1L);
-    if(InputBuffer::GetValue(&result))
-    {
-        baseAddress = (uint32_t)result;
-    }
-    if(InputBuffer::GetValue(&result))
-    {
-        baseAddress |= (((uint32_t)result) << 16);
-    }
+    baseAddress = pDataProvider->GetBaseDumpAddress();
     if (!binaryMode)
     {
         printf("Memory content starting at address 0x%06x:\n", baseAddress);
@@ -93,8 +139,8 @@ void DisplayResult::DisplayDump(bool binaryMode)
 
     if (binaryMode)
     {
-        // Binaty mode
-        while (InputBuffer::GetValue(&result))
+        // Binary mode
+        while (pDataProvider->GetValue(&result))
         {
             stdio_put_string((const char *)&result, 2, false, false);
         }
@@ -108,7 +154,7 @@ void DisplayResult::DisplayDump(bool binaryMode)
             int wrd = 0;
             for (; wrd < DUMP_DISPLAY_LINE_WORDS_COUNT & bContinue; ++wrd)
             {
-                if (InputBuffer::GetValue(&result))
+                if (pDataProvider->GetValue(&result))
                 {
                     sprintf(wordNextCharToSet, "%04x ", result);
                     wordNextCharToSet += 5;

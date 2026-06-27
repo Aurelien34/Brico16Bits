@@ -14,6 +14,14 @@
 #define FLASH_ROM_SIZE (2 * 1024 * 1024)    // 2 megabytes
 
 
+/// @brief Computes the base address of the requested flash memory bank.
+/// @param bankNumber Zero based bank number
+/// @return Offset from the start of the flash memory
+uint32_t ROMImageManager::GetBankAddress(int bankNumber)
+{
+    return FLASH_ROM_START + GetFlashBankAddress(bankNumber);
+}
+
 /// @brief Computes the base address (in flash reference, starting at offset 0x00000000) of the requested flash memory bank.
 /// @param bankNumber Zero based bank number
 /// @return Offset from the start of the flash memory
