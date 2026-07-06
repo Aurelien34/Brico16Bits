@@ -22,7 +22,7 @@
 #include "Commands/CommandTrace.h"
 #include "Commands/CommandFree.h"
 #include "Commands/CommandFreq.h"
-#include "Commands/CommandFsDir.h"
+#include "Commands/CommandLs.h"
 #include "Commands/CommandReset.h"
 #include "Commands/CommandBootSel.h"
 #include "Commands/CommandDebug.h"
@@ -73,7 +73,7 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
     []() -> Command * { return new CommandTrace(); },
     []() -> Command * { return new CommandFree(); },
     []() -> Command * { return new CommandFreq(); },
-    []() -> Command * { return new CommandFsDir(); },
+    []() -> Command * { return new CommandLs(); },
     []() -> Command * { return new CommandReset(); },
 };
 

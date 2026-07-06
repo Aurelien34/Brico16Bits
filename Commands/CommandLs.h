@@ -2,7 +2,7 @@
 
 #include "Command.h"
 
-class CommandFsDir : public Command
+class CommandLs : public Command
 {
 public:
     virtual CommandSection GetCommandSection() const { return CommandSection::System; };

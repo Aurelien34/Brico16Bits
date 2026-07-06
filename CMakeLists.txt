@@ -2,13 +2,13 @@ project (Brico16Bits)
 
 set (COMMANDS_CPP
     Commands/Command.cpp Commands/CommandBankLoadBank.cpp Commands/CommandBankStoreBank.cpp Commands/CommandSetRomWord.cpp Commands/CommandSendROM.cpp Commands/CommandSendROMPart.cpp Commands/CommandReadWord.cpp Commands/CommandReadWords.cpp Commands/CommandTrace.cpp Commands/CommandFree.cpp Commands/CommandFreq.cpp Commands/CommandClearBuffer.cpp
-    Commands/CommandFsDir.cpp Commands/CommandReset.cpp Commands/CommandDelay.cpp
+    Commands/CommandLs.cpp Commands/CommandReset.cpp Commands/CommandDelay.cpp
     Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandDebug.cpp Commands/CommandComment.cpp Commands/CommandListRoms.cpp
     )
 
 set (COMMANDS_H
     Commands/Command.h Commands/CommandBankLoadBank.h Commands/CommandBankStoreBank.h Commands/CommandSetRomWord.h Commands/CommandSendROM.h Commands/CommandSendROMPart.h Commands/CommandReadWord.h Commands/CommandReadWords.h Commands/CommandTrace.h Commands/CommandFree.h Commands/CommandFreq.h Commands/CommandClearBuffer.h
-    Commands/CommandFsDir.h Commands/CommandReset.h Commands/CommandDelay.h
+    Commands/CommandLs.h Commands/CommandReset.h Commands/CommandDelay.h
     Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandDebug.h Commands/CommandComment.h Commands/CommandListRoms.h
     )
 
