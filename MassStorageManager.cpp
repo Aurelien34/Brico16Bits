@@ -61,11 +61,10 @@ static const char *ReadMeData =
 " / /_/ / /  / / /__/ /_/ / /|  /  __/ /_/ /\n" \
 "/_____/_/  /_/\\___/\\____/_/ |_/\\___/\\____/\n" \
 "\n" \
-"Drop your SP1 ROM files at drive root.\n" \
-        ROM_BANK_FOLDER_NAME_ROOT " subfolders send to flash storage banks.\n" \
-        "Bank 0 is loaded at startup.\n"
-        "\"On the fly\" byteswap is possible using .BIO file extension.\n" \
-        "Use 8.3 file names to increase the probability the loading will work!";
+"Place SP1 ROMs at drive root.\n" \
+        ROM_BANK_FOLDER_NAME_ROOT " folders flash to corresponding banks.\n" \
+        "Bank 0 loads at startup.\n"
+        "Auto byteswap by detecting reset vector upper word endianness.";
 
 static const char *IndexHtmData = "<html><head><meta http-equiv=\"refresh\" content=\"0;URL='https://www.delta-island.com/briconeo'\"/></head><body>Redirecting to <a href='https://www.delta-island.com/briconeo'>BricoNeo page on Delta Island forum</a></body></html>'";
 
@@ -111,6 +110,7 @@ uint8_t MassStorageManager::ClustersContent[DISK_BLOCK_COUNT_RAM][DISK_BLOCK_SIZ
 absolute_time_t MassStorageManager::timeToWaitBeforeInjection;
 absolute_time_t MassStorageManager::timeToWaitBeforeEjection;
 bool MassStorageManager::ejected = true;
+uint32_t MassStorageManager::tud_msc_test_unit_ready_cb_count = 0;
 
 uint8_t MassStorageManager::MBR[62] =
 {
@@ -130,7 +130,7 @@ uint8_t MassStorageManager::MBR[62] =
     DISK_BLOCK_SIZE / 32, 0x00,
     // Total 16bit sectors count
     DISK_BLOCK_COUNT & 0xff, (DISK_BLOCK_COUNT >> 8) & 0xff,
-    // Disk type (0xF8 for HDD, 0xF0 for removable disks)
+    // Disk type (0xF8 for HDD, 0xF0 for removable disks). HDD might be necessaru to enable support for device ejection on all systems (even MacOS)
     0xF0,
     // Sectors count for FAT
     FAT_BLOCK_COUNT & 0xff, (FAT_BLOCK_COUNT >> 8) & 0xff,
@@ -153,7 +153,7 @@ uint8_t MassStorageManager::MBR[62] =
     // Disk name on 11 characters
     'B' , 'r' , 'i' , 'c' , 'o' , 'N' , 'e' , 'o' , ' ' , ' ' , ' ',
     // File system type "FAT12"
-    'F', 'A', 'T', '1', '6', ' ', ' ', ' ',
+    'F', 'A', 'T', '1', '2', ' ', ' ', ' ',
 };
 
 void MassStorageManager::Setup()
@@ -179,7 +179,7 @@ void MassStorageManager::InitStorageContent()
     printf("Initializing storage content\n");
 #endif
     // Init VFAT
-    memset(VFAT, 0, FAT_BLOCK_COUNT * DISK_BLOCK_SIZE * sizeof(uint16_t));
+    memset(VFAT, 0, (FAT_BLOCK_COUNT * DISK_BLOCK_SIZE + 3) * sizeof(uint16_t));
     int i = 0;
     VFAT[i++] = 0x0ff8 | FAT_CLUSTER_MARKER_FILLED; // FAT (last cluster marker - for FAT)
     VFAT[i++] = 0x0fff | FAT_CLUSTER_MARKER_FILLED; // Root directory (last cluster marker) Otherwise, next cluster index
@@ -193,8 +193,8 @@ void MassStorageManager::InitStorageContent()
     rootDirectory[11] = 0x08; // Volume name attribute
 
     // Patch volume identifier to increase chances the volume info will be updated
-    //static uint8_t injectCounter = 0;
-    //MBR[62-20] = injectCounter++;
+//    static uint8_t injectCounter = 0;
+//    MBR[62-20] = injectCounter++;
 
     // Add file
     CreateFile("ICON", "ICO", (const char *)DriveIconData, sizeof(DriveIconData), true);
@@ -222,11 +222,20 @@ void MassStorageManager::Loop()
     {
 #ifdef MASS_STORAGE_DEBUG
         printf("Ejecting volume\n");
+        printf("Content before ejection:\n");
+        PrintDirectoryListing();
 #endif
         // Eject the disk
         update_us_since_boot(&timeToWaitBeforeEjection, 0L);
         timeToWaitBeforeInjection = from_us_since_boot(time_us_64() + MASS_STORAGE_REFRESH_INJECTION_DURATION_MS * 1000); // Microseconds
+        tud_connect();
+        // Eject the soft way (Windows)
         ejected = true;
+        if (tud_msc_test_unit_ready_cb_count < 5)
+        {
+            // Eject the hard way (Linux/MacOS)
+            tud_disconnect();
+        }
     }
     // Time to (re)introduce the disk?
     else if (ejected && timeToWaitBeforeInjection != 0L && time_reached(timeToWaitBeforeInjection))
@@ -238,6 +247,11 @@ void MassStorageManager::Loop()
         update_us_since_boot(&timeToWaitBeforeInjection, 0L);
         InitStorageContent();
         ejected = false;
+        //if (tud_msc_test_unit_ready_cb_count < 5)
+        {
+            tud_msc_test_unit_ready_cb_count = 0;
+            tud_connect();
+        }
     }
 #endif
     tud_task();
@@ -253,11 +267,21 @@ void MassStorageManager::PrintDirectoryListing()
 #endif
 }
 
+#ifdef MASS_STORAGE_DEBUG
 void MassStorageManager::DebugCluster(int clusterNumber)
 {
     if (clusterNumber == 0)
     {
-        printf("VFat decoded content:\n");
+        printf("VFat cluster 0:\n");
+        printf("Cluster types:\n");
+        printf("\t? = Unknown\n");
+        printf("\tS = System\n");
+        printf("\tD = Directory\n");
+        printf("\t* = Data (single data cluster)\n");
+        printf("\t[ = Data (first of a chain of data clusters)\n");
+        printf("\t- = Data (intermediate cluster un a chain of data clusters)\n");
+        printf("\t] = Data (last of a chain of data clusters)\n");
+        printf("=>VFat decoded content:\n");
         uint16_t *pVFat = (uint16_t *)VFAT;
         for (int i = 0; i < (FAT_ENTRIES_COUNT_TOTAL + 15) / 16; ++i)
         {
@@ -315,34 +339,37 @@ void MassStorageManager::DebugCluster(int clusterNumber)
         pClusterData = GetClusterMemoryLocation(clusterNumber);
         if (clusterNumber == 1 || pClusterData[0] == '.')
         {
-            printf("Directory cluster %d:\n", clusterNumber);
-            PrettyPrintDirectoryBuffer(pClusterData);
+            printf("Directory cluster #0x%03x:\n", clusterNumber);
+            DebugPrettyPrintDirectoryBuffer(pClusterData);
         }
         else
         {
-            printf("File cluster %d:\n", clusterNumber);
-            for (int i = 0; i < 16; ++i)
+            printf("File cluster #0x%03x:\n", clusterNumber);
+        }
+        for (int i = 0; i < 16; ++i)
+        {
+            for (int j = 0; j < 32; ++j)
             {
-                for (int j = 0; j < 32; ++j)
-                {
-                    printf("%02x ", (int)pClusterData[i*32+j]);
-                }
-                printf("\n");
+                printf("%02x ", (int)pClusterData[i*32+j]);
             }
+            printf("\n");
         }
     }
+    printf("\n");
 }
+#endif
 
 void MassStorageManager::PrintDirectoryListing(int dirCluster, int depth)
 {
     // Local filename buffer
-    char fileNameBuffer[13];
+    uint8_t fileNameBuffer[256];
 
     // Point to the requested cluster
     uint8_t *pClusterData;
     pClusterData = GetClusterMemoryLocation(dirCluster);
 
     // Iterate through directory entries
+    bool bLongFileNameAvalable = false;
     for (int entryNumber = 0; entryNumber < DIRECTORY_ENTRIES_COUNT && pClusterData[entryNumber * DIRECTORY_ENTRY_SIZE] != 0; ++entryNumber)
     {
         // Compute entry base address
@@ -351,15 +378,26 @@ void MassStorageManager::PrintDirectoryListing(int dirCluster, int depth)
         // Read attribute flags
         uint8_t attributes = pEntryData[FAT_OFFSET_FILE_ATTRIBUTES];
         
-        // Special folder or hidden file/folder?
-        if (attributes == 0x0f || attributes & 0x02)
+        // Long filename part?
+        if (attributes == 0x0f)
         {
-            // Special file, do nothing
+            // Long file name element
+            bLongFileNameAvalable = true;
         }
         else
         {
             // We will potentially have a name to display
-            FormatFileName(pEntryData, (uint8_t *)fileNameBuffer);
+            // Build file name
+            if (bLongFileNameAvalable)
+            {
+                fileNameBuffer[0] = 0;
+                BuildLongFileName(pEntryData, fileNameBuffer);
+                bLongFileNameAvalable = false;
+            }
+            else
+            {
+                FormatFileName(pEntryData, fileNameBuffer);
+            }
 
             // Volume name ?
             if (attributes & 0x08)
@@ -373,10 +411,15 @@ void MassStorageManager::PrintDirectoryListing(int dirCluster, int depth)
                 if (attributes & 0x10)
                 {
                     // List directory content if not hidden and if not "." (the current one) or ".." (the parent one)
-                    if (fileNameBuffer[0] != '.')
+                    if (strcmp((char *)fileNameBuffer, ".") && strcmp((char *)fileNameBuffer, ".."))
                     {
                         FormatDepthIndentation(depth);
-                        printf("<DIR>                %s\n", fileNameBuffer);
+                        printf("%c%c%c%c <DIR>  %s\n",
+                            attributes & 0x01 ? 'R' : '-',
+                            attributes & 0x02 ? 'H' : '-',
+                            attributes & 0x04 ? 'S' : '-',
+                            attributes & 0x20 ? 'A' : '-',
+                            fileNameBuffer);
                         int nextClusterIndex = pEntryData[FAT_OFFSET_FIRST_CLUSTER] + (pEntryData[FAT_OFFSET_FIRST_CLUSTER + 1] << 8);
                         PrintDirectoryListing(nextClusterIndex, depth + 1);
                     }
@@ -385,18 +428,59 @@ void MassStorageManager::PrintDirectoryListing(int dirCluster, int depth)
                 // File
                 {
                     FormatDepthIndentation(depth);
-                    printf("%6d bytes %s\n", pEntryData[FAT_OFFSET_FILE_SIZE] + (pEntryData[FAT_OFFSET_FILE_SIZE + 1] << 8) + (pEntryData[FAT_OFFSET_FILE_SIZE + 2] << 16) + (pEntryData[FAT_OFFSET_FILE_SIZE + 3] << 24), fileNameBuffer);
+                    printf("%c%c%c%c %6d bytes %s\n",
+                        attributes & 0x01 ? 'R' : '-',
+                        attributes & 0x02 ? 'H' : '-',
+                        attributes & 0x04 ? 'S' : '-',
+                        attributes & 0x20 ? 'A' : '-',
+                        pEntryData[FAT_OFFSET_FILE_SIZE] + (pEntryData[FAT_OFFSET_FILE_SIZE + 1] << 8) + (pEntryData[FAT_OFFSET_FILE_SIZE + 2] << 16) + (pEntryData[FAT_OFFSET_FILE_SIZE + 3] << 24), fileNameBuffer);
                 }
             }
         }
     }
 }
 
+void MassStorageManager::BuildLongFileName(const uint8_t *pClusterData, uint8_t *szFileNameBuffer)
+{
+    int fileNameLength = strlen((char *)szFileNameBuffer);
+
+    // Point to the first file name element
+    const uint8_t * pClusterPtr = pClusterData;
+
+    // Iterate through previous clusters
+    do
+    {
+        // Move to the "next" cluster (the previous one, as the name if built upside down)
+        pClusterPtr -= DIRECTORY_ENTRY_SIZE;
+
+        // First part of name info
+        for (int i = 0; i < 5; ++i)
+        {
+            szFileNameBuffer[fileNameLength++] = pClusterPtr[1 + i * 2];
+        }
+
+        // Second part of name info
+        for (int i = 0; i < 6; ++i)
+        {
+            szFileNameBuffer[fileNameLength++] = pClusterPtr[14 + i * 2];
+        }
+
+        // Third part of name info
+        for (int i = 0; i < 2; ++i)
+        {
+            szFileNameBuffer[fileNameLength++] = pClusterPtr[28 + i * 2];
+        }
+    } while ((*pClusterPtr & 0x40) == 0);
+    
+    // Terminate the string
+    szFileNameBuffer[fileNameLength] = 0;
+}
+
 void MassStorageManager::FormatDepthIndentation(int depth)
 {
     for (int i = 0; i < depth; ++i)
     {
-        printf("|");
+        printf("   >   ");
     }
     printf(" ");
 }
@@ -492,7 +576,9 @@ void MassStorageManager::FileCopyComplete(int parentDirectoryCluster, int parent
     uint8_t *pDirectoryEntryData = GetClusterMemoryLocation(parentDirectoryCluster) + parentDirectoryEntryIndex * DIRECTORY_ENTRY_SIZE;
 
     // Get file extension to determine if we should byteswap the ROM image
-    bool romNeedsByteSwap = (pDirectoryEntryData[8] == 'B' && pDirectoryEntryData[9] == 'I' && pDirectoryEntryData[10] == 'O');
+    uint16_t dataClusterNumber = ((uint16_t *)pDirectoryEntryData)[13];
+    uint16_t resetVector = ((uint16_t *)GetClusterMemoryLocation(dataClusterNumber))[2];
+    bool romNeedsByteSwap = (resetVector == 0xc000);
 
     // Byteswap if needed
     if (romNeedsByteSwap)
@@ -558,7 +644,10 @@ int32_t MassStorageManager::ReadHook(uint32_t lba, uint32_t offset, void* buffer
 {
     if (ejected)
     {
+#ifdef MASS_STORAGE_DEBUG
+        printf("ReadHook => Inform that the disk has been ejected\n");
         return -1;
+#endif
     }
     // Out of authorized space!
     if ( lba >= DISK_BLOCK_COUNT )
@@ -834,7 +923,8 @@ int MassStorageManager::GetFreeRAMClustersAvailable()
     return clustersAvailable;
 }
 
-void MassStorageManager::PrettyPrintDirectoryBuffer(uint8_t *buffer)
+#ifdef MASS_STORAGE_DEBUG
+void MassStorageManager::DebugPrettyPrintDirectoryBuffer(uint8_t *buffer)
 {
     char fileNameBuffer[13];
     // Iterate through entries and show files, attributes, first cluster and size
@@ -846,10 +936,24 @@ void MassStorageManager::PrettyPrintDirectoryBuffer(uint8_t *buffer)
             break;
         }
         FormatFileName(row, (uint8_t *)fileNameBuffer);
-        printf("%12s type 0x%02x cluster 0x%02x size %d bytes\n", fileNameBuffer, (int)row[0x0b], (int)((uint16_t *)row)[13], ((uint32_t *)row)[7]);
+        uint8_t clusterAttrib = row[0x0b];
+        if (clusterAttrib == 0x0f)
+        {
+            printf("%02x:           #%d attr 0x%02x long file name part\n", i, row[0] & ~0x40, (int)clusterAttrib);
+        }
+        else if (clusterAttrib & 0x10)
+        {
+            printf("%02x: %12s attr 0x%02x cluster 0x%02x sub-directory\n", i, fileNameBuffer, (int)clusterAttrib, (int)((uint16_t *)row)[13]);
+        }
+        else
+        {
+            printf("%02x: %12s attr 0x%02x cluster 0x%02x size %d bytes\n", i, fileNameBuffer, (int)clusterAttrib, (int)((uint16_t *)row)[13], ((uint32_t *)row)[7]);
+        }
+
     }    
     
 }
+#endif
 
 MassStorageManager::ClusterType MassStorageManager::GetClusterInfo(int clusterIndex, int &parentDirectoryCluster, int &parentDirectoryEntryIndex, int &firstDataCluster)
 {
@@ -990,7 +1094,8 @@ bool MassStorageManager::FindClusterDirectoryEntry(int clusterIndex, int &parent
 void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
 {
 #ifdef MASS_STORAGE_DEBUG
-    printf("Writing cluster %d (lba %d, cluster state before write: 0x%04x)\n", clusterIndex, clusterIndex + 1, VFAT[clusterIndex]);
+    printf("Writing cluster 0x%03x (lba %d, cluster state before write: 0x%04x)\n", clusterIndex, clusterIndex + 1, VFAT[clusterIndex]);
+    DebugCluster(0);
 #endif
 
     // Determine if the file transfer is over and file info
@@ -1019,10 +1124,20 @@ void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
                 // Found a directory entry
                 // Determine if the file is a regular file (not a system or hidden one)
                 uint8_t *pDirectoryEntryData = GetClusterMemoryLocation(myParentDirectoryCluster) + myParentDirectoryEntryIndex * DIRECTORY_ENTRY_SIZE;
-                uint8_t fileAttributes = pDirectoryEntryData[0x0b];
+                uint8_t fileAttributes = pDirectoryEntryData[0x0b]; // 0x0b is the file attributes offset in directory structure
 
                 // Regular file?
-                if ((fileAttributes & ~0x20) == 0)
+                uint8_t *pDirectoryEntry;
+                
+                if (((fileAttributes & ~0x20) == 0)                 // 0x20 is the Archive attribute. Other values point to special file / directory / hidden file / read-only.
+                    &&
+                    (
+                        (myParentDirectoryCluster == 1)
+                        ||
+                        ((pDirectoryEntry = FindDirectoryClusterData(myParentDirectoryCluster)) != NULL)
+                        && ((pDirectoryEntry[0x0b] & 0x07) == 0)
+                    )
+                )
                 {
                     // Now we know the file the cluster belongs to!
                     isFileIdentified = true;
@@ -1049,7 +1164,8 @@ void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
     #endif
                     // Now determine if we have finished the file transfer after this cluster
                     // We can call the copy complete only if the file size had been given
-                    bTransferComplete = clusterCountDirectory != 0 && (clusterCountDirectory == clusterCountUntilNow);
+                    if (clusterCountDirectory != 0 && (clusterCountDirectory == clusterCountUntilNow))
+                        bTransferComplete = true;
                     transferedDirectoryCluster = myParentDirectoryCluster;
                     transferedDirectoryEntryIndex = myParentDirectoryEntryIndex;
                 }
@@ -1057,7 +1173,7 @@ void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
                 {
                     // We have a system or read-only file => we consider they should stay in RAM and we don't change anything
 #ifdef MASS_STORAGE_DEBUG
-                    printf("Potential system or read-only file\n");
+                    printf("Potential system or read-only file. File attributes: 0x%02x\n", fileAttributes);
 #endif
                 }
             }
@@ -1082,7 +1198,7 @@ void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
                 else
                 {
                     // Previous cluster is not marked as a ROM cluster (yet?)
-                    int prevClusterDirectoryCluster = 1;    
+                    /*int prevClusterDirectoryCluster = 1;    
                     int prevClusterDirectoryEntryIndex, prevClusterFirstDataCluster;
                     ClusterType prevClusterType = GetClusterInfo(prevClusterIndex, prevClusterDirectoryCluster, prevClusterDirectoryEntryIndex, prevClusterFirstDataCluster);
                     if (prevClusterType != ClusterType::Directory && prevClusterType != ClusterType::System && prevClusterDirectoryCluster == 0)
@@ -1102,11 +1218,19 @@ void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
                         // The current one's data will be moved by the standard write code once we have set the correct ROM flag
                         VFAT[clusterIndex] |= FAT_CLUSTER_MARKER_ROM;
                     }
-                    else
+                    else*/
                     {
 #ifdef MASS_STORAGE_DEBUG
-                        printf("Previous cluster was in a known state: prevClusterType = %d, prevClusterDirectoryCluster = %d\n", (int)prevClusterType, prevClusterDirectoryCluster);
+                        printf("Checking bytes @0x0004-0x0007: %02x %02x %02x %02x\n", ((uint8_t *)buffer)[4], ((uint8_t *)buffer)[5], ((uint8_t *)buffer)[6], ((uint8_t *)buffer)[7]);
 #endif
+                        uint16_t resetVector = ((uint16_t *)buffer)[2];
+                        if (resetVector == 0xc000 || resetVector == 0x00c0)
+                        {
+#ifdef MASS_STORAGE_DEBUG
+                            printf("Detected start of ROM file!!!\n");
+#endif
+                            VFAT[clusterIndex] |= FAT_CLUSTER_MARKER_ROM;
+                        }
                     }
                 }
             }
@@ -1114,7 +1238,7 @@ void MassStorageManager::WriteCluster(int clusterIndex, void* buffer)
         else if (myClusterType == ClusterType::Directory)
         {
 #ifdef MASS_STORAGE_DEBUG
-            PrettyPrintDirectoryBuffer((uint8_t *)buffer);
+            DebugPrettyPrintDirectoryBuffer((uint8_t *)buffer);
 #endif
             // A directory cluster is being updated
             // We need to compare it with its previous version
@@ -1194,4 +1318,27 @@ int MassStorageManager::CountPreviousClusters(int clusterIndex)
     }
 
     return totalCount;
+}
+
+uint8_t * MassStorageManager::FindDirectoryClusterData(int directoryClusterIndex)
+{
+    if (directoryClusterIndex > 1)
+    {
+        uint8_t * pMyClusterData = GetClusterMemoryLocation(directoryClusterIndex);
+        if (pMyClusterData != NULL)
+        {
+            uint16_t parentClusterNumber = (uint16_t)((uint16_t *)(pMyClusterData + DIRECTORY_ENTRY_SIZE + 26))[0];
+            if (parentClusterNumber > 0)
+            {
+                uint8_t * pMyParentClusterData = GetClusterMemoryLocation(parentClusterNumber);
+                for (int i = 0; i < DIRECTORY_ENTRIES_COUNT; ++i)
+                {
+                    uint8_t * myClusterEntry = pMyClusterData + DIRECTORY_ENTRY_SIZE * i;
+                    if (((uint16_t *)(myClusterEntry+ 26))[0] == directoryClusterIndex)
+                        return myClusterEntry;
+                }
+            }
+        }
+    }
+    return NULL;
 }

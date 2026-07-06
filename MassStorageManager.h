@@ -14,7 +14,7 @@
 
 #define DISK_BLOCK_COUNT ((DISK_BLOCK_COUNT_ROM) + (DISK_BLOCK_COUNT_RAM))
 #define DISK_BLOCK_COUNT_ROM 256
-#define DISK_BLOCK_COUNT_RAM 24 // Change this if more blocks are needed
+#define DISK_BLOCK_COUNT_RAM 80 // Change this if more blocks are needed DISK_BLOCK_COUNT_ROM+DISK_BLOCK_COUNT_RAM should not exceed 340 blocs
 #define DISK_BLOCK_SIZE 512
 
 #define MASS_STORAGE_VIRTUAL_BLOCK_COUNT (DISK_BLOCK_COUNT_ROM + DISK_BLOCK_COUNT_RAM + 2)
@@ -40,6 +40,8 @@ public:
     static uint16_t CreateFile(const char *fileName, const char *fileExtension, const char *fileContent, int fileContentSize, bool hidden = false, bool isFolder = false, uint16_t currentFolder = 1, uint16_t parentFolderCluster = 1);
     static uint16_t GetNextFreeClusterIndex();
     static bool ejected;
+    static uint32_t tud_msc_test_unit_ready_cb_count;
+    static void EjectInject();
 private:
     enum class ClusterType
     {
@@ -60,7 +62,6 @@ private:
     static uint8_t ClustersContent[DISK_BLOCK_COUNT_RAM][DISK_BLOCK_SIZE];
     
     static void InitStorageContent();
-    static void EjectInject();
     static void ReadMBR(void* buffer);
     static void ReadFAT(void* buffer);
     static void WriteFAT(void* buffer);
@@ -70,12 +71,15 @@ private:
     static void FileCopyComplete(int parentDirectoryCluster, int parentDirectoryEntryIndex);
     static ClusterType GetClusterInfo(int clusterIndex, int &parentDirectoryCluster, int &parentDirectoryEntryIndex, int &firstDataCluster);
     static bool FindClusterDirectoryEntry(int clusterIndex, int &parentDirectoryCluster, int &parentDirectoryEntryIndex);
-
+    static uint8_t * FindDirectoryClusterData(int directoryClusterIndex);
     static void PrintDirectoryListing(int dirCluster, int depth);
+    static void BuildLongFileName(const uint8_t *pClusterData, uint8_t *szFileNameBuffer);
     static void FormatFileName(const uint8_t *pDirEntry, uint8_t *pTargetBuffer13Bytes);
     static void FormatDepthIndentation(int depth);
+#ifdef MASS_STORAGE_DEBUG
     static void DebugCluster(int clusterNumber);
-    static void PrettyPrintDirectoryBuffer(uint8_t *buffer);
+    static void DebugPrettyPrintDirectoryBuffer(uint8_t *buffer);
+#endif
     static int CountPreviousClusters(int clusterIndex);
     static bool IsValidFileExtension(const char *extension);
 };

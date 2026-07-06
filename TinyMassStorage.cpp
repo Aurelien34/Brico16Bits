@@ -210,6 +210,9 @@ bool tud_msc_test_unit_ready_cb(uint8_t lun)
 {
   (void) lun;
 
+  // Identifies Linux/MacOS behavior
+  MassStorageManager::tud_msc_test_unit_ready_cb_count++;
+
   // RAM disk is ready until ejected
   if (MassStorageManager::ejected) {
     // Additional Sense 3A-00 is NOT_FOUND
