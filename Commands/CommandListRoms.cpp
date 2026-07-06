@@ -8,7 +8,7 @@
 
 #include "CommandListRoms.h"
 
-#define DUMP_LENGTH 128
+#define DUMP_LENGTH (128+8)
 #define COMMAND_NAME "ListRoms"
 
 #define COMMAND_DESC_TEXT "List ROM banks content (shows a dump of the first bytes of each bank)"
