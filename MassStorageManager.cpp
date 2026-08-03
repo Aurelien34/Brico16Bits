@@ -1,29 +1,6 @@
 //http://elm-chan.org/docs/fat_e.html
 //https://fr.wikipedia.org/wiki/File_Allocation_Table
 
-/*
-
-Copie chez Windows:
-- Création entrée Directory avec nom fichier et Numéro du premier cluster (pas de taille)
-- Allocation de tous les clusters dans la FAT
-- MAJ entrée Directory avec la taille du fichier
-- Ecriture des clusters en séquence
-
-Copie chez Linux (Pi400):
-- Création entrée Directory avec nom du fichier uniquement (pas de cluster, ni de taille)
-- Allocation des clusters dans la FAT, une opération par cluster en déplaçant à chaque fois le cluster final
-- Ecriture des clusters en séquence
-- MAJ de l'entrée Directory avec le cluster et la taille (2 fois!)
-
-Copie sur Mac:
-- Ecriture des clusters en séquence
-- Mise à jour de la FAT
-- Crash => rien n'est sûr!
-- Probable: MAJ de l'entrée Directory avec le cluster et la taille
-
-*/
-
-
 #include <bsp/board.h>
 #include <tusb.h>
 #include <pico/unique_id.h>
