@@ -121,6 +121,7 @@ private:
     bool Opcode_ROXL_ROXR_reg();
     bool Opcode_ROXL_ROXR_mem();
     bool Opcode_Rtr();
+    bool Opcode_Rte();
     bool Opcode_Rts();
     bool Opcode_Sbcd();
     bool Opcode_Scc();

@@ -923,6 +923,12 @@ bool OpcodeDecoder::Opcode_Rtr()
     return true;
 }
 
+bool OpcodeDecoder::Opcode_Rte()
+{
+    Append("rte");
+    return true;
+}
+
 bool OpcodeDecoder::Opcode_Rts()
 {
     Append("rts");
@@ -1015,6 +1021,7 @@ const OpcodeDecoder::opcodedesc OpcodeDecoder::maOpcodeTable[] =
     {&OpcodeDecoder::Opcode_Unlk,           0b1111111111111000, 0b0100111001011000 },
     {&OpcodeDecoder::Opcode_Illegal,        0b1111111111111111, 0b0100101011111100 },
     {&OpcodeDecoder::Opcode_TrapV,          0b1111111111111111, 0b0100111001110110 },
+    {&OpcodeDecoder::Opcode_Rte,            0b1111111111111111, 0b0100111001110011 },
     {&OpcodeDecoder::Opcode_Rts,            0b1111111111111111, 0b0100111001110101 },
     {&OpcodeDecoder::Opcode_Rtr,            0b1111111111111111, 0b0100111001110111 },
     {&OpcodeDecoder::Opcode_OrItoCCR,       0b1111111111111111, 0b0000000000111100 },
