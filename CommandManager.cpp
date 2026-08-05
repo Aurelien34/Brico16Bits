@@ -41,15 +41,19 @@
 #define MAX_LENGTH_RETURN_MESSAGE (1024 - 1)
 
 // Colors can be found here: https://tintin.mudhalla.net/info/256color/
-#define COLOR_INDEX_NORMAL              7
-#define COLOR_INDEX_COMMAND_NAME        12
-#define COLOR_INDEX_COMMAND_PARAMETERS  5
-#define COLOR_INDEX_COMMAND_DESCRIPTION 7
-#define COLOR_INDEX_PROMPT              13
-#define COLOR_INDEX_ERROR               9
-#define COLOR_INDEX_RETURN_MESSAGES     10
-#define COLOR_INDEX_SECTION_NAME        14
-#define COLOR_INDEX_COMMENT             2
+#define COLOR_INDEX_NORMAL                  7
+#define COLOR_INDEX_COMMAND_NAME            12
+#define COLOR_INDEX_COMMAND_PARAMETERS      5
+#define COLOR_INDEX_COMMAND_DESCRIPTION     7
+#define COLOR_INDEX_PROMPT                  13
+#define COLOR_INDEX_ERROR                   9
+#define COLOR_INDEX_RETURN_MESSAGES         10
+#define COLOR_INDEX_SECTION_NAME            14
+#define COLOR_INDEX_COMMENT                 2
+#define COLOR_INDEX_KEYBOARD_MODE_COMMAND   46
+#define COLOR_INDEX_KEYBOARD_MODE_REMOTE    201
+
+#define REMOTE_KEYBOARD_ACTIVATION_KEY  0x09 // TAB
 
 Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
 {
@@ -78,6 +82,8 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
 };
 
 bool CommandManager::gbPromptDisplayedOnce = false;
+bool CommandManager::gbKeyboardModeActive = false;
+bool CommandManager::gbKeyboardModeSerialReady = false;
 char CommandManager::gcCurrentCommand[MAX_COMMAND_WIDTH + 1] {0};
 char CommandManager::gcPreviousCommand[MAX_COMMAND_WIDTH + 1] {0};
 
@@ -125,9 +131,12 @@ void CommandManager::InitSerial()
 
 void CommandManager::HandlePrompt()
 {
+    // Switch to the correct keyboard mode
+    SetKeyboardActiveMode(IsKeyboardModeActive());
+    
+    // Show welcome message?
     if (IsTerminalConnected())
     {
-        ActivityLED::SetActivityType(ActivityLED::ActivityType::TerminalConnected);
         // Serial connection is established
         // Should we display the user prompt?
         if (!gbPromptDisplayedOnce)
@@ -138,19 +147,52 @@ void CommandManager::HandlePrompt()
             sleep_ms(50);
             // Show prompt and get commands!
             ShowPrompt();
-            ResetCommand();
+            // Display the correct prompt
+            ShowCommandsList();
+            // Activate remote keyboard by default
+            if (((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode))
+            {
+                gbKeyboardModeActive = false;
+                SetKeyboardActiveMode(true);
+            }
+            if (!IsKeyboardModeActive())
+            {
+                ResetCommand();
+            }
         }
     }
     else
     {
-        ActivityLED::SetActivityType(ActivityLED::ActivityType::Idle);
         // Cancel the previous display of the prompt
         gbPromptDisplayedOnce = false;
     }
+
     if (IsTerminalConnected() || IsSerialConnected())
     {
-        // Read commands
-        ReadCommands();
+        if (IsKeyboardModeActive())
+        {
+            // Remote keyboard mode enabled, send keys to the 68k
+            char c;
+            if (GetChar(&c))
+            {
+                // Tab key?
+                if (c == REMOTE_KEYBOARD_ACTIVATION_KEY && ((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode))
+                {
+                    SetKeyboardActiveMode(false);
+                }
+                else
+                {
+                    sleep_ms(1);
+                    ROMImageManager::GetImageBaseAddressB()[0x1fffa] = (uint8_t)c;
+                    ROMImageManager::GetImageBaseAddressB()[0x1fffb]++;
+                }
+            }
+        }
+        else
+        {
+            // Read commands
+            ReadCommands();
+        }
     }
 }
 
@@ -214,7 +256,6 @@ void CommandManager::ShowPrompt()
     printf("/_____/_/  /_/\\___/\\____/_/ |_/\\___/\\____/ \n");
     printf("\n");
     printf("\n");
-    ShowCommandsList();
 }
 
 void CommandManager::ShowCommandsList()
@@ -239,6 +280,7 @@ void CommandManager::ShowCommandsList()
     Command::CommandSection eCurrentSection = (Command::CommandSection)-1;
     for (int iCommand = 0;;++iCommand)
     {
+        tud_task();
         Command *pCommand = GetCommand(iCommand);
         if (pCommand != NULL)
         {
@@ -292,6 +334,22 @@ void CommandManager::ShowCommandsList()
             break;
         }
     }
+    if ((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode)
+    {
+        printf("\n");
+        SetColorForeground(COLOR_INDEX_SECTION_NAME);
+        printf("Remote keyboard");
+        SetColorForeground(COLOR_INDEX_NORMAL);
+        printf(":\nThis ROM supports remote keyboard. Press the TAB key to switch between ");
+        SetColorForeground(COLOR_INDEX_KEYBOARD_MODE_COMMAND);
+        printf("command");
+        SetColorForeground(COLOR_INDEX_NORMAL);
+        printf(" and ");
+        SetColorForeground(COLOR_INDEX_KEYBOARD_MODE_REMOTE);
+        printf("remote");
+        SetColorForeground(COLOR_INDEX_NORMAL);
+        printf(" keyboard modes\n");
+    }
     printf("\n");
 }
 
@@ -338,7 +396,13 @@ void CommandManager::ReadCommands()
         case 0x7f:
             bDel = true;
             break;
-        case 0x09: // Tab
+        case REMOTE_KEYBOARD_ACTIVATION_KEY: // Tab
+            if ((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode)
+            {
+                SetKeyboardActiveMode(true);
+                bIgnore = true;
+            }
+            break;
         case 0xff:
             bIgnore = true;
             break;
@@ -603,6 +667,7 @@ void CommandManager::CommandRequest()
                         }
                         while (bResult & !(bAutoRepeat && GetChar(&c)))
                         {
+                            tud_task();
                             bResult = cmd-> Execute(pcReturnMessage, MAX_LENGTH_RETURN_MESSAGE, pcParam1, pcParam2, pcParam3);
                             
                             if (IsTerminalConnected())
@@ -690,4 +755,54 @@ void CommandManager::CommandRequest()
         }
     }
     ResetCommand();
+}
+
+void CommandManager::SetKeyboardActiveMode(bool active)
+{
+    bool bSerialReady = IsTerminalConnected() || IsSerialConnected();
+    
+    if (bSerialReady)
+    {
+        // Check if keyboard is supported
+        bool bRomSupportsKeyboard = (int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode;
+        
+        // Serial connection is ready
+        if (bRomSupportsKeyboard)
+        {
+            // Active flag changed?
+            if (gbKeyboardModeActive != active)
+            {
+                // Store new activity value
+                gbKeyboardModeActive = active;
+                if (active)
+                {
+                    SetColorForeground(COLOR_INDEX_KEYBOARD_MODE_REMOTE);
+                    printf("\nRemote keyboard mode. Keys are tranfered to the remote (type TAB to get back to command mode)\n");
+                    SetColorForeground(COLOR_INDEX_NORMAL);
+                    ActivityLED::SetActivityType(ActivityLED::ActivityType::RemoteKeyboardConnected);
+
+                }
+                else
+                {
+                    SetColorForeground(COLOR_INDEX_KEYBOARD_MODE_COMMAND);
+                    printf("\nCommand mode (type TAB to get back to remote keyboard mode)\n");
+                    SetColorForeground(COLOR_INDEX_NORMAL);
+                    ResetCommand();
+                    ActivityLED::SetActivityType(ActivityLED::ActivityType::TerminalConnected);
+                }
+            }
+        }
+        else
+        {
+            // Keyboard not supported
+            ActivityLED::SetActivityType(ActivityLED::ActivityType::TerminalConnected);
+        }
+    }
+    else
+    {
+        // Serial connection is not ready
+        // Disable keywbord
+        gbKeyboardModeActive = false;
+        ActivityLED::SetActivityType(ActivityLED::ActivityType::Idle);
+    }
 }

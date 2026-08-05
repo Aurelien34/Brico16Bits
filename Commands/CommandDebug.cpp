@@ -80,7 +80,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     }
     else
     {
-        printf("Found non conventional system ROM. Hoping Trace routine has been configured.");
+        printf("Found non conventional system ROM. Hoping Trace routine has been configured.\n");
     }
 
     printf("Resetting the NeoGeo board...\n");

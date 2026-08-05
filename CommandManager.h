@@ -18,6 +18,8 @@ public:
 private:
     static Command * (* gaBuiltInCommandConstructors [])();
     static bool gbPromptDisplayedOnce;
+    static bool gbKeyboardModeActive;
+    static bool gbKeyboardModeSerialReady;
     static char gcPreviousCommand[];
     static char gcCurrentCommand[];
     static void ShowPrompt();
@@ -25,4 +27,6 @@ private:
     static void ReadCommands();
     static void ResetCommand();
     static void CommandRequest();
+    static inline bool IsKeyboardModeActive() { return gbKeyboardModeActive; }
+    static void SetKeyboardActiveMode(bool active);
 };

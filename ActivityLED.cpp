@@ -44,12 +44,17 @@ bool ActivityLED::IrqHandler(struct repeating_timer *t)
     case ActivityType::TerminalConnected:
         gpio_put(PIN_ACTIVITY_LED, 1);
         break;
+    case ActivityType::RemoteKeyboardConnected:
+        if ((gnTickCount >> 4) & 0x1)
+            gpio_put(PIN_ACTIVITY_LED, 1);
+        else
+            gpio_put(PIN_ACTIVITY_LED, 0);
+        break;
     case ActivityType::DataTransfer:
         if ((gnTickCount >> 0) & 0x1)
             gpio_put(PIN_ACTIVITY_LED, 1);
         else
             gpio_put(PIN_ACTIVITY_LED, 0);
-        break;
         break;
     default:
         // Should not reach here

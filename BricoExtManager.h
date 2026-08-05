@@ -11,7 +11,8 @@ public:
         None = 0x0000,
         EnableExtensions = 0x0001,
         The68kSendsCommands = 0x0002,
-        NeoDiagCRCMirrorComputation = 0x0004
+        NeoDiagCRCMirrorComputation = 0x0004,
+        RemoteKeyboardMode = 0x0008,
     };
 
     static bool IsBricoNeoROM();

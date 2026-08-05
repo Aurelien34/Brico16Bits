@@ -16,5 +16,4 @@ void Command68kPrintText::Execute()
         // Temporary, need an indirection here to handle an external string
         putchar(value);
     }
-    printf("\n");
 }

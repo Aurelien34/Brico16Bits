@@ -11,6 +11,7 @@ public:
         Off,
         Idle,
         TerminalConnected,
+        RemoteKeyboardConnected,
         DataTransfer
     };
     static void Setup();
