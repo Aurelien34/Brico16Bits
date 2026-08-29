@@ -788,14 +788,14 @@ void CommandManager::SetKeyboardActiveMode(bool active)
                     printf("\nCommand mode (type TAB to get back to remote keyboard mode)\n");
                     SetColorForeground(COLOR_INDEX_NORMAL);
                     ResetCommand();
-                    ActivityLED::SetActivityType(ActivityLED::ActivityType::TerminalConnected);
+                    ActivityLED::SetActivityType(IsTerminalConnected() ? ActivityLED::ActivityType::TerminalConnected : ActivityLED::ActivityType::Idle);
                 }
             }
         }
         else
         {
             // Keyboard not supported
-            ActivityLED::SetActivityType(ActivityLED::ActivityType::TerminalConnected);
+            ActivityLED::SetActivityType(IsTerminalConnected() ? ActivityLED::ActivityType::TerminalConnected : ActivityLED::ActivityType::Idle);
         }
     }
     else
