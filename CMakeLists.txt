@@ -62,8 +62,29 @@ target_include_directories(Brico16Bits PUBLIC
 # pull in common dependencies
 target_link_libraries(Brico16Bits pico_stdlib hardware_pio hardware_dma hardware_flash pico_multicore pico_unique_id tinyusb_device tinyusb_board)
 
-pico_enable_stdio_usb(Brico16Bits 1)
-pico_enable_stdio_uart(Brico16Bits 0)
+# Choose stdio backend: USB (default) or UART on GPIO20 (TX) / GPIO21 (RX), i.e. UART1
+set(STDIO_BACKEND "USB" CACHE STRING "Stdio backend: USB or UART (GPIO20 TX / GPIO21 RX)")
+set_property(CACHE STDIO_BACKEND PROPERTY STRINGS USB UART)
+
+set(STDIO_UART_BAUD_RATE "115200" CACHE STRING "UART baud rate used when STDIO_BACKEND=UART")
+
+if(STDIO_BACKEND STREQUAL "UART")
+    pico_enable_stdio_usb(Brico16Bits 0)
+    pico_enable_stdio_uart(Brico16Bits 1)
+    add_compile_definitions(
+        PICO_DEFAULT_UART=1
+        PICO_DEFAULT_UART_TX_PIN=20 # Matches BricoNeo SDA pin
+        PICO_DEFAULT_UART_RX_PIN=21 # Matches BricoNeo SCL pin
+        PICO_DEFAULT_UART_BAUD_RATE=${STDIO_UART_BAUD_RATE}
+        STDIO_BACKEND_UART=1
+    )
+elseif(STDIO_BACKEND STREQUAL "USB")
+    pico_enable_stdio_usb(Brico16Bits 1)
+    pico_enable_stdio_uart(Brico16Bits 0)
+    add_compile_definitions(STDIO_BACKEND_USB=1)
+else()
+    message(FATAL_ERROR "STDIO_BACKEND must be USB or UART, got: ${STDIO_BACKEND}")
+endif()
 
 # Compute date and time constants
 string(TIMESTAMP BUILD_DATE_TIME_FULL "%Y/%m/%d %H:%M")

@@ -1,7 +1,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <pico/stdio.h>
-#include <pico/stdio_usb.h>
 #include "CommandManager.h"
 #include "CommandSendROMPart.h"
 #include "ROMImageManager.h"

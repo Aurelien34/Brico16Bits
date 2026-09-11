@@ -126,11 +126,14 @@ bool CommandManager::IsTerminalConnected()
 
 void CommandManager::InitSerial()
 {
+#ifdef STDIO_BACKEND_USB
     stdio_usb_init();
+#endif
 }
 
 void CommandManager::HandlePrompt()
 {
+#ifdef STDIO_BACKEND_USB
     // Switch to the correct keyboard mode
     SetKeyboardActiveMode(IsKeyboardModeActive());
     
@@ -194,6 +197,14 @@ void CommandManager::HandlePrompt()
             ReadCommands();
         }
     }
+#endif
+#ifdef STDIO_BACKEND_UART
+    int c;
+    if ((c = getchar_timeout_us(10)) >= 0)
+    {
+        printf("Coucou: %3d 0x%02x %c\n", c, c, c);
+    }
+#endif
 }
 
 bool CommandManager::GetChar(char *received)
