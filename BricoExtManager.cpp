@@ -23,6 +23,12 @@ BricoExtManager::SpecialModeFlags BricoExtManager::GetSpecialModeFlags()
     return (SpecialModeFlags)flags;
 }
 
+bool BricoExtManager::IsRemoteKeyboardSupported()
+{
+    // Remote keyboard is available only for BricoNeo ROM
+    return IsBricoNeoROM() && ((int)GetSpecialModeFlags() & (int)SpecialModeFlags::RemoteKeyboardMode);
+}
+
 uint32_t BricoExtManager::GetExtAddress(int iExtIndex)
 {
     void*pBaseAdrress = GetExtInfoBaseAddress(iExtIndex);

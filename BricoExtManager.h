@@ -16,6 +16,7 @@ public:
     };
 
     static bool IsBricoNeoROM();
+    static bool IsRemoteKeyboardSupported();
     static int GetExtCount();
     static SpecialModeFlags GetSpecialModeFlags();
     static void *GetExtInfoBaseAddress(int iExtIndex);

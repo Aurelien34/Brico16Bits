@@ -154,7 +154,7 @@ void CommandManager::HandlePrompt()
             // Display the correct prompt
             ShowCommandsList();
             // Activate remote keyboard by default
-            if (((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode))
+            if (BricoExtManager::IsRemoteKeyboardSupported())
             {
                 gbKeyboardModeActive = false;
                 SetKeyboardActiveMode(true);
@@ -188,7 +188,7 @@ void CommandManager::HandlePrompt()
             if (GetChar(&c))
             {
                 // Tab key?
-                if (c == REMOTE_KEYBOARD_ACTIVATION_KEY && ((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode))
+                if (c == REMOTE_KEYBOARD_ACTIVATION_KEY && BricoExtManager::IsRemoteKeyboardSupported())
                 {
                     SetKeyboardActiveMode(false);
                 }
@@ -418,7 +418,7 @@ void CommandManager::ShowCommandsList()
             break;
         }
     }
-    if ((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode)
+    if (BricoExtManager::IsRemoteKeyboardSupported())
     {
         printf("\n");
         SetColorForeground(COLOR_INDEX_SECTION_NAME);
@@ -482,7 +482,7 @@ void CommandManager::ReadCommands()
             bDel = true;
             break;
         case REMOTE_KEYBOARD_ACTIVATION_KEY: // Tab
-            if ((int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode)
+            if (BricoExtManager::IsRemoteKeyboardSupported())
             {
                 SetKeyboardActiveMode(true);
                 bIgnore = true;
@@ -860,7 +860,7 @@ void CommandManager::SetKeyboardActiveMode(bool active)
     if (bSerialReady)
     {
         // Check if keyboard is supported
-        bool bRomSupportsKeyboard = (int)BricoExtManager::GetSpecialModeFlags() & (int)BricoExtManager::SpecialModeFlags::RemoteKeyboardMode;
+        bool bRomSupportsKeyboard = BricoExtManager::IsRemoteKeyboardSupported();
         
         // Serial connection is ready
         if (bRomSupportsKeyboard)
