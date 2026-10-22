@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdarg.h>
 #include <pico/stdlib.h>
 #include <pico/stdio.h>
 #include <tusb.h>
@@ -39,6 +40,8 @@
 #define MAX_COMMAND_COUNT 10
 #define MAX_COMMAND_WIDTH 100
 #define MAX_LENGTH_RETURN_MESSAGE (1024 - 1)
+#define MAX_LENGTH_ASYNC_MESSAGE 127
+#define MAX_LENGTH_PENDING_MESSAGES (512 - 1)
 
 // Colors can be found here: https://tintin.mudhalla.net/info/256color/
 #define COLOR_INDEX_NORMAL                  7
@@ -83,6 +86,8 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
 bool CommandManager::gbPromptDisplayedOnce = false;
 bool CommandManager::gbKeyboardModeActive = false;
 bool CommandManager::gbKeyboardModeSerialReady = false;
+bool CommandManager::gbCommandRunning = false;
+char CommandManager::gcPendingMessages[MAX_LENGTH_PENDING_MESSAGES + 1] {0};
 char CommandManager::gcCurrentCommand[MAX_COMMAND_WIDTH + 1] {0};
 char CommandManager::gcPreviousCommand[MAX_COMMAND_WIDTH + 1] {0};
 
@@ -164,6 +169,14 @@ void CommandManager::HandlePrompt()
     {
         // Cancel the previous display of the prompt
         gbPromptDisplayedOnce = false;
+        // Nobody to read pending messages
+        gcPendingMessages[0] = 0;
+    }
+
+    // Display messages received in the background (ROM loaded...)
+    if (gbPromptDisplayedOnce)
+    {
+        DisplayPendingMessages();
     }
 
     if (IsTerminalConnected() || IsSerialConnected())
@@ -222,9 +235,80 @@ void CommandManager::ResetCommand()
     gcCurrentCommand[0] = 0;
     if (IsTerminalConnected())
     {
-        SetColorForeground(COLOR_INDEX_PROMPT);
-        printf("> ");
+        // Messages received while a command was running are displayed before the new prompt
+        FlushPendingMessages();
+        ShowInputLine();
+    }
+}
+
+/// @brief Display the prompt followed by the command being typed
+void CommandManager::ShowInputLine()
+{
+    SetColorForeground(COLOR_INDEX_PROMPT);
+    printf("> ");
+    SetColorForeground(COLOR_INDEX_NORMAL);
+    printf("%s", gcCurrentCommand);
+}
+
+void CommandManager::FlushPendingMessages()
+{
+    if (gcPendingMessages[0] != 0)
+    {
+        // Take the messages out of the queue before printing, in case USB processing queues a new one meanwhile
+        char messages[MAX_LENGTH_PENDING_MESSAGES + 1];
+        strcpy(messages, gcPendingMessages);
+        gcPendingMessages[0] = 0;
+
+        SetColorForeground(COLOR_INDEX_RETURN_MESSAGES);
+        printf("%s", messages);
         SetColorForeground(COLOR_INDEX_NORMAL);
+    }
+}
+
+/// @brief Queue a message coming from outside the command flow (e.g. ROM received). Safe to call from USB callbacks.
+/// It is displayed by HandlePrompt() without breaking the console (input line erased, message displayed, prompt and command being typed restored),
+/// or before the next prompt if a command is running.
+void CommandManager::PrintAsyncMessage(const char *format, ...)
+{
+    if (!IsTerminalConnected())
+    {
+        return;
+    }
+
+    char message[MAX_LENGTH_ASYNC_MESSAGE + 1];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    // Queue the message (dropped if the queue is full)
+    size_t pendingLength = strlen(gcPendingMessages);
+    if (pendingLength + strlen(message) + 1 <= MAX_LENGTH_PENDING_MESSAGES)
+    {
+        strcpy(gcPendingMessages + pendingLength, message);
+        strcat(gcPendingMessages, "\n");
+    }
+}
+
+/// @brief Display queued asynchronous messages below the input line, then display the input line again
+/// so that the user sees the typing has been interrupted (no prompt in remote keyboard mode)
+void CommandManager::DisplayPendingMessages()
+{
+    if (gcPendingMessages[0] == 0 || gbCommandRunning)
+    {
+        return;
+    }
+    if (IsKeyboardModeActive())
+    {
+        // No input line in remote keyboard mode: just make sure we start at the beginning of an empty line
+        printf("\r\e[2K");
+        FlushPendingMessages();
+    }
+    else
+    {
+        printf("\n");
+        FlushPendingMessages();
+        ShowInputLine();
     }
 }
 
@@ -367,7 +451,7 @@ void CommandManager::ReadCommands()
         bool bHistory = false;
         char cTyped = 0;
 
-        // Backspace: 0x7f
+        // Backspace: 0x7f (or 0x08, depending on the terminal settings, e.g. Tera Term)
         // Home:    0x1b 0x5b 0x31 0x7e
         // DEL:     0x1b 0x5b 0x33 0x7e
         // Up:      0x1b 0x5b 0x41
@@ -394,6 +478,7 @@ void CommandManager::ReadCommands()
             bReturn = true;
             break;
         case 0x7f:
+        case 0x08:
             bDel = true;
             break;
         case REMOTE_KEYBOARD_ACTIVATION_KEY: // Tab
@@ -448,7 +533,15 @@ void CommandManager::ReadCommands()
             }
             break;
         default:
-            cTyped = cReceived;
+            if ((unsigned char)cReceived < 0x20)
+            {
+                // Other control characters would break the input line display
+                bIgnore = true;
+            }
+            else
+            {
+                cTyped = cReceived;
+            }
             break;
         }
 
@@ -538,7 +631,9 @@ void CommandManager::ReadCommands()
                     {
                         printf("\n");
                     }
+                    gbCommandRunning = true;
                     CommandRequest();
+                    gbCommandRunning = false;
                 }
             }
         }
@@ -707,8 +802,9 @@ void CommandManager::CommandRequest()
 
                             if (bAutoRepeat)
                             {
-                                // Do USB processing to handle serial line and mass storage events
+                                // Do USB processing to handle serial line, mass storage and ROM upload events
                                 MassStorageManager::Loop();
+                                ROMUploadManager::Loop();
                             }
                             else
                             {

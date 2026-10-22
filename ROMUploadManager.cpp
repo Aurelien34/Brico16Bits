@@ -61,10 +61,6 @@ void ROMUploadManager::StartTransfer()
     tud_cdc_n_write_clear(ROM_UPLOAD_CDC_ITF);
 
     ActivityLED::SetActivityType(ActivityLED::ActivityType::DataTransfer);
-    if (CommandManager::IsTerminalConnected())
-    {
-        printf("\nROM upload started\n");
-    }
 }
 
 void ROMUploadManager::StoreData(const uint8_t *data, uint32_t count)
@@ -100,23 +96,18 @@ void ROMUploadManager::EndTransfer()
 
     if (!gbHeaderValid)
     {
-        if (CommandManager::IsTerminalConnected())
-        {
-            printf("ROM upload ignored: %lu bytes received, not a SP1 ROM image (invalid reset vector)\n", (unsigned long)gnReceivedBytes);
-        }
+        CommandManager::PrintAsyncMessage("ROM upload ignored: %lu bytes received, not a SP1 ROM image (invalid reset vector)", (unsigned long)gnReceivedBytes);
         SendStatus("ERROR %lu bytes received, ignored: invalid reset vector\r\n", (unsigned long)gnReceivedBytes);
         return;
     }
 
-    bool bByteSwapped = ROMImageManager::FinalizeReceivedImage();
+    FinalizeResult result = ROMImageManager::FinalizeReceivedImage();
     const char *szTruncated = (gnReceivedBytes > FLASH_IMAGE_SIZE) ? ", truncated" : "";
-    const char *szByteSwapped = bByteSwapped ? ", byteswapped" : "";
+    const char *szByteSwapped = result.byteSwapped ? ", byteswapped" : "";
+    const char *szNeoDiag = result.neoDiag ? ", NeoDiag" : "";
 
-    if (CommandManager::IsTerminalConnected())
-    {
-        printf("ROM upload complete: %lu bytes%s%s\n", (unsigned long)gnReceivedBytes, szTruncated, szByteSwapped);
-    }
-    SendStatus("OK %lu bytes%s%s\r\n", (unsigned long)gnReceivedBytes, szTruncated, szByteSwapped);
+    CommandManager::PrintAsyncMessage("ROM received on data port: %lu bytes%s%s%s", (unsigned long)gnReceivedBytes, szTruncated, szByteSwapped, szNeoDiag);
+    SendStatus("OK %lu bytes%s%s%s\r\n", (unsigned long)gnReceivedBytes, szTruncated, szByteSwapped, szNeoDiag);
 
     // Force reset on the remote system
     PIOManager::ForceWatchdogReset();

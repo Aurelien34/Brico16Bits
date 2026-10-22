@@ -9,6 +9,13 @@
 #define FLASH_IMAGE_SIZE (128 * 1024)
 
 
+// What has been done on a freshly received ROM image, see ROMImageManager::FinalizeReceivedImage()
+struct FinalizeResult
+{
+    bool byteSwapped;
+    bool neoDiag;
+};
+
 class ROMImageManager
 {
 private:
@@ -22,5 +29,5 @@ public:
     static void GetFromFlash(int bankNumber);
     static void GetFromFlashAsyncStart(int bankNumber);
     static void GetFromFlashAsyncEnd();
-    static bool FinalizeReceivedImage();
+    static FinalizeResult FinalizeReceivedImage();
 };

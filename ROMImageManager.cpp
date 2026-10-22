@@ -66,15 +66,17 @@ void ROMImageManager::GetFromFlashAsyncEnd()
 }
 
 /// @brief Post-process a ROM image freshly received in RAM (mass storage or ROM upload serial port): byteswap if needed, then NeoDiag processing
-/// @return true if the image has been byteswapped
-bool ROMImageManager::FinalizeReceivedImage()
+/// @return What has been done on the image, so that the caller can report it
+FinalizeResult ROMImageManager::FinalizeReceivedImage()
 {
+    FinalizeResult result;
+
     // Detect endianness using the reset vector upper word
     uint16_t *pImage = GetImageBaseAddressW();
-    bool romNeedsByteSwap = (pImage[2] == 0xc000);
+    result.byteSwapped = (pImage[2] == 0xc000);
 
     // Byteswap if needed
-    if (romNeedsByteSwap)
+    if (result.byteSwapped)
     {
 #ifdef MASS_STORAGE_DEBUG
         printf("The file needs byteswap\n");
@@ -94,17 +96,11 @@ bool ROMImageManager::FinalizeReceivedImage()
 #endif
     }
 
-    // Handle NeoDiag ROM image with BricoNeo flags
-    if (NeoDiagImageBuilder::CheckAndBuildImage())
-    {
-        printf("NeoDiag image detected and processed (CRC32 computation)\n");
-    }
-    else
-    {
+    // Handle NeoDiag ROM image with BricoNeo flags (CRC32 computation)
+    result.neoDiag = NeoDiagImageBuilder::CheckAndBuildImage();
 #ifdef MASS_STORAGE_DEBUG
-        printf("No NeoDiag image detected\n");
+    printf(result.neoDiag ? "NeoDiag image detected and processed\n" : "No NeoDiag image detected\n");
 #endif
-    }
 
-    return romNeedsByteSwap;
+    return result;
 }

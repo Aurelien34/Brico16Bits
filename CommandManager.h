@@ -15,17 +15,23 @@ public:
     static inline void HideCursor() { printf("\e[?25l"); }
     static bool GetChar(char *received);
     static char GetCharBlocking();
+    static void PrintAsyncMessage(const char *format, ...);
 private:
     static Command * (* gaBuiltInCommandConstructors [])();
     static bool gbPromptDisplayedOnce;
     static bool gbKeyboardModeActive;
     static bool gbKeyboardModeSerialReady;
+    static bool gbCommandRunning;
+    static char gcPendingMessages[];
     static char gcPreviousCommand[];
     static char gcCurrentCommand[];
     static void ShowPrompt();
     static void ShowCommandsList();
     static void ReadCommands();
     static void ResetCommand();
+    static void ShowInputLine();
+    static void FlushPendingMessages();
+    static void DisplayPendingMessages();
     static void CommandRequest();
     static inline bool IsKeyboardModeActive() { return gbKeyboardModeActive; }
     static void SetKeyboardActiveMode(bool active);

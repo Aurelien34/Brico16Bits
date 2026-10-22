@@ -10,6 +10,7 @@
 #include "MassStorageManager.h"
 #include "MemoryMap.h"
 #include "PIOManager.h"
+#include "CommandManager.h"
 
 #define FAT_OFFSET_FILE_NAME  0x00
 #define FAT_OFFSET_FILE_EXTENSION  0x08
@@ -549,10 +550,11 @@ void MassStorageManager::FileCopyComplete(int parentDirectoryCluster, int parent
 #endif
 
     // Byteswap if needed and handle NeoDiag image
-    ROMImageManager::FinalizeReceivedImage();
+    FinalizeResult result = ROMImageManager::FinalizeReceivedImage();
 
     // Determine if we should store the image in a bank
     // Iterate through flash banks
+    int storedBankNumber = -1;
     for (int bankNumber = 0; bankNumber < FLASH_MAX_ROM_BANKS; ++bankNumber)
     {
         // Is our parent in the bank clusters list?
@@ -562,9 +564,21 @@ void MassStorageManager::FileCopyComplete(int parentDirectoryCluster, int parent
             printf("Sending image to flash bank %d\n", bankNumber);
 #endif
             ROMImageManager::SendToFlash(bankNumber);
+            storedBankNumber = bankNumber;
         }
 
     }
+
+    // Report to the console
+    uint8_t *pDirectoryEntryData = GetClusterMemoryLocation(parentDirectoryCluster) + parentDirectoryEntryIndex * DIRECTORY_ENTRY_SIZE;
+    uint32_t fileSize = *(uint32_t *)(pDirectoryEntryData + FAT_OFFSET_FILE_SIZE);
+    char szBank[24] = "";
+    if (storedBankNumber >= 0)
+    {
+        sprintf(szBank, ", stored in bank %d", storedBankNumber);
+    }
+    CommandManager::PrintAsyncMessage("ROM received on mass storage: %lu bytes%s%s%s", (unsigned long)fileSize,
+        result.byteSwapped ? ", byteswapped" : "", result.neoDiag ? ", NeoDiag" : "", szBank);
     
 #ifdef MASS_STORAGE_DEBUG
     printf("=> Program volume ejection\n");
