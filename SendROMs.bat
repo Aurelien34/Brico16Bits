@@ -1,29 +1,30 @@
-@SET COMPORT=COM5
+@SET CONSOLEPORT=COM3
+@SET ROMPORT=COM4
 @SET ROMPATH=.\ROM\
 
-@ECHO Port %COMPORT% configuration...
-@mode %COMPORT%: dtr=on data=8 parity=n baud=57600 dtr=off rts=off> nul
+@ECHO Ports %CONSOLEPORT% / %ROMPORT% configuration...
+@mode %CONSOLEPORT%: dtr=on data=8 parity=n baud=57600 dtr=off rts=off> nul
+@mode %ROMPORT%: data=8 parity=n baud=57600 dtr=off rts=off> nul
 
 @echo:
 @echo ROM UNIBIOS
-@echo SendROM> %COMPORT%
-@echo - Send
-@type %ROMPATH%UNIBIOS4.BIN> %COMPORT%
-@echo - Flash to bank 0
-@echo StoreBank 0 > %COMPORT%
+@CALL :SENDROM UNIBIOS4.BIN 0
 
 @echo:
 @echo ROM NEODIAG
-@echo SendROM> %COMPORT%
-@echo - Send
-@type %ROMPATH%DIAG019.BIN> %COMPORT%
-@echo - Flash to bank 1
-@echo StoreBank 1 > %COMPORT%
+@CALL :SENDROM DIAG019.BIN 1
 
 @echo:
 @echo ROM NEOPENBIOS
-@echo SendROM> %COMPORT%
+@CALL :SENDROM NEOPEN.BIN 2
+
+@GOTO :EOF
+
+:SENDROM
 @echo - Send
-@type %ROMPATH%NEOPEN.BIN> %COMPORT%
-@echo - Flash to bank 2
-@echo StoreBank 2 > %COMPORT%
+@copy /b %ROMPATH%%1 %ROMPORT% > nul
+@REM Wait for BricoNeo to detect the end of transfer (300 ms without data) and process the image
+@ping -n 2 127.0.0.1 > nul
+@echo - Flash to bank %2
+echo StoreBank %2 > %CONSOLEPORT%
+@GOTO :EOF

@@ -18,7 +18,7 @@ You can ask any question here: [Delta Island forum](https://delta-island.com/bri
 - [Using the serial console](#using-the-serial-console)
 - [Command reference](#command-reference)
 - [Loading ROM images via USB mass storage](#loading-rom-images-via-usb-mass-storage)
-- [Loading ROM images via the console](#loading-rom-images-via-the-console)
+- [Loading ROM images via the ROM upload serial port](#loading-rom-images-via-the-rom-upload-serial-port)
 - [Diagnostics: bus tracing, frequency counter, live 68000 debugger](#diagnostics-bus-tracing-frequency-counter-live-68000-debugger)
 - [BricoExt: talking back from your own ROM](#bricoext-talking-back-from-your-own-rom)
 - [Building the firmware](#building-the-firmware)
@@ -30,7 +30,7 @@ You can ask any question here: [Delta Island forum](https://delta-island.com/bri
 
 - **EPROM emulation**: emulates the SP1 program ROM over the native address/data bus, using the RP2040/RP2354 PIO block / DMA so the Neo Geo sees a real ROM with no added wait states.
 - **4 ROM banks** stored in the Pico's flash (128 KB each), any of which can be loaded into "live" RAM in a fraction of a second — no more re-flashing an EPROM to try another BIOS/diagnostic tool.
-- **Dual USB personality**: the board enumerates as both a USB-CDC serial console and a USB mass-storage drive at the same time to make ROM uploads easier.
+- **Triple USB personality**: the board enumerates as a USB-CDC serial console, a second USB-CDC serial port dedicated to ROM uploads and a USB mass-storage drive at the same time to make ROM uploads easier.
 - **Drag & drop ROM loading**: drop a `.BIN` file on the BricoNeo USB drive to flash it straight to a bank.
 - **Interactive command-line console** for ROM management, raw bus reads, tracing, and system control + diagnostic commands using a special diag ROM.
 - **Bus address tracer**: records the addresses accessed by the Neo Geo in a ring buffer for later inspection — useful to see where a board's CPU gets stuck.
@@ -65,9 +65,10 @@ BricoNeo replaces the **SP1 (system program) ROM** on the Neo Geo motherboard: i
 
 ## Connecting to the board
 
-Plugging in the USB cable exposes **two USB devices** at once:
+Plugging in the USB cable exposes **three USB devices** at once:
 
-- A **serial (USB-CDC) console** — open it with any serial terminal (PuTTY, Tera Term, `screen`, CoolTerm, minicom...). The baud rate doesn't matter since it's a native USB-CDC connection.
+- A **serial (USB-CDC) console** (first serial port) — open it with any serial terminal (PuTTY, Tera Term, `screen`, CoolTerm, minicom...). The baud rate doesn't matter since it's a native USB-CDC connection.
+- A **ROM upload serial port** (second serial port) — any data sent to it is loaded as a ROM image (see [below](#loading-rom-images-via-the-rom-upload-serial-port)).
 - A **USB mass-storage drive** named `BricoNeo`, used to drag & drop ROM images (see below).
 
 As soon as a terminal opens the serial port, BricoNeo prints its welcome banner: build date, board unique serial number, and (if a BricoNeo-aware ROM is currently loaded) its version and special mode flags, followed by the full command list.
@@ -102,7 +103,6 @@ ROM images are stored in 4 flash banks; bank 0 is loaded automatically at startu
 
 | Command | Parameters | Description |
 |---|---|---|
-| `SendROM` | | Upload a full 128 KB ROM image from the host over serial into RAM (mass storage is easier) |
 | `SendROMPart` | `bytes` | Upload `bytes` bytes of a ROM image; negative value auto-byteswaps |
 | `LoadBank` | `x` | Load flash bank `x` into RAM (and resets the Neo Geo) |
 | `StoreBank` | `x` | Store the current RAM image into flash bank `x` |
@@ -142,22 +142,23 @@ This is the easiest way to swap BIOS/diagnostic images. Works OK under Windows, 
 
 > This repository does **not** ship any ROM images — the local `ROM/` folder used during development (BIOS dumps, diagnostic tools, Unibios...) is intentionally excluded (see `.gitignore`). You need to supply your own dumps; make sure you're legally entitled to use them (e.g. dumps of hardware you own, or open-source tools such as [Universe BIOS](https://unibios.free.fr/) if licensed, [NeoDiag](https://wiki.neogeodev.org/index.php?title=Diagnostic_ROM)...).
 
-## Loading ROM images via the console
+## Loading ROM images via the ROM upload serial port
 
-Not the prefered way to upload a ROM, as it requires the serial port to be free. Equivalent workflow from the terminal, e.g. to flash a BIOS into bank 0:
-
-```
-SendROM
-> Now send your file
-```
-
-Then push the raw 128 KB `.BIN` file over the serial port (see [`SendROMs.bat`](SendROMs.bat) for a scriptable example on Windows), followed by:
+The second serial port is dedicated to ROM uploads, and behaves like a file dropped at the root of the mass-storage drive: the received data is loaded into BricoNeo's RAM, byteswapped if needed (auto-detected), and the Neo Geo is reset. Just redirect the raw `.BIN` file to the port from a shell:
 
 ```
-StoreBank 0
+copy /b UNIBIOS4.BIN COM6        (Windows)
+cat UNIBIOS4.BIN > /dev/ttyACM1  (Linux)
+cat UNIBIOS4.BIN > /dev/cu.usbmodemXXXX3  (macOS)
 ```
 
-`SendROMs.bat` shows how to batch this over a COM port to pre-load several banks in one go (adjust `COMPORT` and `ROMPATH` first).
+- The end of the transfer is detected when the host closes the port, or after 300 ms without data. Data beyond 128 KB is ignored.
+- Data that doesn't look like a SP1 image (reset vector not pointing to `0xC0xxxx`, in either endianness) is ignored: this protects the current image against port probing by the OS or text typed by mistake.
+- A file smaller than 128 KB only overwrites the beginning of the current image.
+- If the port is still open at the end of the transfer, a status line is sent back (`OK 131072 bytes, byteswapped` or `ERROR ...`). A message is also printed on the console if a terminal is connected.
+- The image goes to RAM only. To persist it, type `StoreBank x` on the console.
+
+[`SendROMs.bat`](SendROMs.bat) shows how to pre-load several banks in one go on Windows, using both serial ports (adjust `CONSOLEPORT`, `ROMPORT` and `ROMPATH` first).
 
 ## Diagnostics: bus tracing, frequency counter, live 68000 debugger
 

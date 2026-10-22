@@ -10,7 +10,6 @@
 #include "MassStorageManager.h"
 #include "MemoryMap.h"
 #include "PIOManager.h"
-#include "NeoDiagImageBuilder.h"
 
 #define FAT_OFFSET_FILE_NAME  0x00
 #define FAT_OFFSET_FILE_EXTENSION  0x08
@@ -549,48 +548,8 @@ void MassStorageManager::FileCopyComplete(int parentDirectoryCluster, int parent
     printf("End of ROM transfert\n");
 #endif
 
-    // Get directory entry
-    uint8_t *pDirectoryEntryData = GetClusterMemoryLocation(parentDirectoryCluster) + parentDirectoryEntryIndex * DIRECTORY_ENTRY_SIZE;
-
-    // Get file extension to determine if we should byteswap the ROM image
-    uint16_t dataClusterNumber = ((uint16_t *)pDirectoryEntryData)[13];
-    uint16_t resetVector = ((uint16_t *)GetClusterMemoryLocation(dataClusterNumber))[2];
-    bool romNeedsByteSwap = (resetVector == 0xc000);
-
-    // Byteswap if needed
-    if (romNeedsByteSwap)
-    {
-#ifdef MASS_STORAGE_DEBUG
-        printf("The file needs byteswap\n");
-#endif
-
-        // Byteswap the whole image
-        for (int i = 0; i < 65536; ++i)
-        {
-            uint16_t val = ((uint16_t *)BASE_ADDRESS_IMAGE_IN_RAM)[i];
-            ((uint16_t *)BASE_ADDRESS_IMAGE_IN_RAM)[i] = (val >> 8) + (val << 8);
-        }
-    }
-    else
-    {
-#ifdef MASS_STORAGE_DEBUG
-        printf("The file does not need byteswap\n");
-#endif
-    }
-
-    // Handle NeoDiag ROM image with BricoNeo flags
-    if (NeoDiagImageBuilder::CheckAndBuildImage())
-    {
-//#ifdef MASS_STORAGE_DEBUG
-        printf("NeoDiag image detected and processed (CRC32 computation)\n");
-//#endif
-    }
-    else
-    {
-#ifdef MASS_STORAGE_DEBUG
-        printf("No NeoDiag image detected\n");
-#endif
-    }
+    // Byteswap if needed and handle NeoDiag image
+    ROMImageManager::FinalizeReceivedImage();
 
     // Determine if we should store the image in a bank
     // Iterate through flash banks

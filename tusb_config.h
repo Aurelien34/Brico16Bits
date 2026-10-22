@@ -91,14 +91,14 @@
 #endif
 
 //------------- CLASS -------------//
-#define CFG_TUD_CDC              1
+#define CFG_TUD_CDC              2 // CDC 0: console, CDC 1: ROM upload
 #define CFG_TUD_MSC              1
 #define CFG_TUD_HID              0
 #define CFG_TUD_MIDI             0
 #define CFG_TUD_VENDOR           0
 
 // CDC FIFO size of TX and RX
-#define CFG_TUD_CDC_RX_BUFSIZE   (TUD_OPT_HIGH_SPEED ? 512 : 64)
+#define CFG_TUD_CDC_RX_BUFSIZE   (TUD_OPT_HIGH_SPEED ? 512 : 256)
 #define CFG_TUD_CDC_TX_BUFSIZE   (TUD_OPT_HIGH_SPEED ? 512 : 64)
 
 // CDC Endpoint transfer buffer size, more is faster

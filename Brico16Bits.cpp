@@ -14,6 +14,7 @@
 #include "ActivityLED.h"
 #include "InputBuffer.h"
 #include "MassStorageManager.h"
+#include "ROMUploadManager.h"
 #include "CommandManager68k.h"
 
 // See MemoryMap.h for memory mapping
@@ -71,6 +72,7 @@ int main()
         // Handle user inputs
         CommandManager::HandlePrompt();
         MassStorageManager::Loop();
+        ROMUploadManager::Loop();
         CommandManager68k::HandleCommands();
     }
 }

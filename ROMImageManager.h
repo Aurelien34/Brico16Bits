@@ -22,4 +22,5 @@ public:
     static void GetFromFlash(int bankNumber);
     static void GetFromFlashAsyncStart(int bankNumber);
     static void GetFromFlashAsyncEnd();
+    static bool FinalizeReceivedImage();
 };

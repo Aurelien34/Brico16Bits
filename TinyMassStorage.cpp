@@ -97,6 +97,8 @@ enum
 {
   ITF_NUM_CDC = 0,
   ITF_NUM_CDC_DATA,
+  ITF_NUM_CDC_ROM,
+  ITF_NUM_CDC_ROM_DATA,
   ITF_NUM_MSC,
   ITF_NUM_TOTAL
 };
@@ -108,7 +110,11 @@ enum
 #define EPNUM_MSC_OUT     0x03
 #define EPNUM_MSC_IN      0x83
 
-#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
+#define EPNUM_CDC_ROM_NOTIF   0x84
+#define EPNUM_CDC_ROM_OUT     0x05
+#define EPNUM_CDC_ROM_IN      0x85
+
+#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + 2 * TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
 
 // full speed configuration
 uint8_t const desc_fs_configuration[] =
@@ -118,6 +124,9 @@ uint8_t const desc_fs_configuration[] =
 
   // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
   TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
+
+  // ROM upload serial port
+  TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_ROM, 6, EPNUM_CDC_ROM_NOTIF, 8, EPNUM_CDC_ROM_OUT, EPNUM_CDC_ROM_IN, 64),
 
   // Interface number, string index, EP Out & EP In address, EP size
   TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 5, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
@@ -141,11 +150,12 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
 char const* string_desc_arr [] =
 {
   (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
-  "TinyUSB",                     // 1: Manufacturer
-  "TinyUSB Device",              // 2: Product
-  "123456789012",                // 3: Serials, should use chip ID
-  "TinyUSB CDC",                 // 4: CDC Interface
-  "TinyUSB MSC",                 // 5: MSC Interface
+  "Bouz",                        // 1: Manufacturer
+  "BricoNeo",                    // 2: Product
+  NULL,                          // 3: Serial, built from the chip unique ID
+  "BricoNeo Console",            // 4: CDC Interface
+  "BricoNeo Storage",            // 5: MSC Interface
+  "BricoNeo Data",               // 6: CDC data Interface (ROM upload)
 };
 
 static uint16_t _desc_str[32];
@@ -171,6 +181,14 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
     const char* str = string_desc_arr[index];
 
+    // Serial number: chip unique ID, so that each board gets its own COM ports
+    static char serial[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+    if (index == 3)
+    {
+      pico_get_unique_board_id_string(serial, sizeof(serial));
+      str = serial;
+    }
+
     // Cap at max char
     chr_count = (uint8_t) strlen(str);
     if ( chr_count > 31 ) chr_count = 31;
@@ -195,8 +213,8 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
 {
   (void) lun;
 
-  const char vid[] = "TinyUSB";
-  const char pid[] = "Mass Storage";
+  const char vid[] = "Bouz";       // 8 characters max
+  const char pid[] = "BricoNeo";   // 16 characters max
   const char rev[] = "1.0";
 
   memcpy(vendor_id  , vid, strlen(vid));

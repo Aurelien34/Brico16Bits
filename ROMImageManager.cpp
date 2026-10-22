@@ -9,6 +9,7 @@
 #include "MemoryMap.h"
 #include "ROMImageManager.h"
 #include "DMAManager.h"
+#include "NeoDiagImageBuilder.h"
 
 #define FLASH_ROM_START 0x10000000
 #define FLASH_ROM_SIZE (2 * 1024 * 1024)    // 2 megabytes
@@ -62,4 +63,48 @@ void ROMImageManager::GetFromFlashAsyncStart(int bankNumber)
 void ROMImageManager::GetFromFlashAsyncEnd()
 {
     DMAManager::DMAEndCopyDW();
+}
+
+/// @brief Post-process a ROM image freshly received in RAM (mass storage or ROM upload serial port): byteswap if needed, then NeoDiag processing
+/// @return true if the image has been byteswapped
+bool ROMImageManager::FinalizeReceivedImage()
+{
+    // Detect endianness using the reset vector upper word
+    uint16_t *pImage = GetImageBaseAddressW();
+    bool romNeedsByteSwap = (pImage[2] == 0xc000);
+
+    // Byteswap if needed
+    if (romNeedsByteSwap)
+    {
+#ifdef MASS_STORAGE_DEBUG
+        printf("The file needs byteswap\n");
+#endif
+
+        // Byteswap the whole image
+        for (int i = 0; i < FLASH_IMAGE_SIZE / 2; ++i)
+        {
+            uint16_t val = pImage[i];
+            pImage[i] = (val >> 8) + (val << 8);
+        }
+    }
+    else
+    {
+#ifdef MASS_STORAGE_DEBUG
+        printf("The file does not need byteswap\n");
+#endif
+    }
+
+    // Handle NeoDiag ROM image with BricoNeo flags
+    if (NeoDiagImageBuilder::CheckAndBuildImage())
+    {
+        printf("NeoDiag image detected and processed (CRC32 computation)\n");
+    }
+    else
+    {
+#ifdef MASS_STORAGE_DEBUG
+        printf("No NeoDiag image detected\n");
+#endif
+    }
+
+    return romNeedsByteSwap;
 }

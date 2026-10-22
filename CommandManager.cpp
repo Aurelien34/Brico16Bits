@@ -8,13 +8,13 @@
 #include "PinDefinitions.h"
 #include "ROMImageManager.h"
 #include "MassStorageManager.h"
+#include "ROMUploadManager.h"
 #include "BricoExtManager.h"
 
 #include "Commands/Command.h"
 #include "Commands/CommandBankLoadBank.h"
 #include "Commands/CommandBankStoreBank.h"
 #include "Commands/CommandSetRomWord.h"
-#include "Commands/CommandSendROM.h"
 #include "Commands/CommandSendROMPart.h"
 #include "Commands/CommandReadWord.h"
 #include "Commands/CommandReadWords.h"
@@ -63,7 +63,6 @@ Command * (* CommandManager::gaBuiltInCommandConstructors [])() =
     []() -> Command * { return new CommandDelay(); },
     []() -> Command * { return new CommandDebug(); },
     // ROM management
-    []() -> Command * { return new CommandSendROM(); },
     []() -> Command * { return new CommandSendROMPart(); },
     []() -> Command * { return new CommandBankLoadBank(); },
     []() -> Command * { return new CommandBankStoreBank(); },
@@ -213,6 +212,7 @@ char CommandManager::GetCharBlocking()
     while (!GetChar(&c))
     {
         MassStorageManager::Loop();
+        ROMUploadManager::Loop();
     }
     return c;
 }
