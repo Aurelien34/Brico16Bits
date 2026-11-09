@@ -73,7 +73,7 @@ FinalizeResult ROMImageManager::FinalizeReceivedImage()
 
     // Detect endianness using the reset vector upper word
     uint16_t *pImage = GetImageBaseAddressW();
-    result.byteSwapped = (pImage[2] == 0xc000);
+    result.byteSwapped = ((pImage[2] & 0xF0FF) == 0xC000);
 
     // Byteswap if needed
     if (result.byteSwapped)
