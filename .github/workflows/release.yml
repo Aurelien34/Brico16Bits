@@ -1,4 +1,4 @@
-name: Build and release (Pico 2 ARM)
+name: Build and release (Pico 2 ARM + Pico)
 
 on:
   push:
@@ -95,18 +95,27 @@ jobs:
           echo "Next version: v1.${next}"
 
       # ---------- Build ----------
-      - name: Configure
+      - name: Build Pico 2 (RP2350 ARM)
         run: |
-          cmake -S . -B build \
+          cmake -S . -B build-pico2 \
             -DCMAKE_BUILD_TYPE=Release \
             -DPICO_SDK_PATH="$HOME/pico-sdk" \
             -DPICO_BOARD=pico2 \
             -DPICO_PLATFORM=rp2350-arm-s \
             -Dpicotool_DIR="$HOME/picotool-install/picotool" \
             -DBRICO16BITS_VERSION="${{ steps.version.outputs.version }}"
+          cmake --build build-pico2 -j"$(nproc)"
 
-      - name: Build
-        run: cmake --build build -j"$(nproc)"
+      - name: Build Pico (RP2040)
+        run: |
+          cmake -S . -B build-pico \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$HOME/pico-sdk" \
+            -DPICO_BOARD=pico \
+            -DPICO_PLATFORM=rp2040 \
+            -Dpicotool_DIR="$HOME/picotool-install/picotool" \
+            -DBRICO16BITS_VERSION="${{ steps.version.outputs.version }}"
+          cmake --build build-pico -j"$(nproc)"
 
       # ---------- Release ----------
       - name: Publish release
@@ -114,9 +123,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          cp build/Brico16Bits.uf2 "Brico16Bits-${VERSION}-pico2.uf2"
+          cp build-pico2/Brico16Bits.uf2 "Brico16Bits-${VERSION}-pico2.uf2"
+          cp build-pico/Brico16Bits.uf2 "Brico16Bits-${VERSION}-pico.uf2"
           gh release create "$VERSION" \
             "Brico16Bits-${VERSION}-pico2.uf2" \
+            "Brico16Bits-${VERSION}-pico.uf2" \
             --target "$GITHUB_SHA" \
             --title "BricoNeo ${VERSION}" \
             --generate-notes
