@@ -316,7 +316,7 @@ void CommandManager::ShowPrompt()
 {
     printf("\033[2J\033[H");
     SetColorForeground(COLOR_INDEX_NORMAL);
-    printf("\n\nWelcome to BricoNeo - Compiled " BUILD_DATE_TIME_FULL " - ");
+    printf("\n\nWelcome to BricoNeo " FIRMWARE_VERSION " - Compiled " BUILD_DATE_TIME_FULL " - ");
     SetColorForeground(1);
     printf("Bouz/@AurelienBricole\n");
     SetColorForeground(COLOR_INDEX_NORMAL);

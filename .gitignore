@@ -5,3 +5,4 @@ mingw.cmd
 pcdecode.cpp
 pcdecode.exe
 /ROM
+build/

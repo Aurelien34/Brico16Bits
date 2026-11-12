@@ -1,4 +1,40 @@
-project (Brico16Bits)
+# This file works both as a subdirectory of a parent project (PicoRoot)
+# and as a standalone top-level project (e.g. GitHub Actions build).
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(BRICO16BITS_STANDALONE ON)
+
+    # Same toolchain/SDK selection as the Raspberry Pi Pico VS Code extension, when available
+    if(WIN32)
+        set(USERHOME $ENV{USERPROFILE})
+    else()
+        set(USERHOME $ENV{HOME})
+    endif()
+    set(sdkVersion 2.3.0)
+    set(toolchainVersion 15_2_Rel1)
+    set(picotoolVersion 2.3.0)
+    set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+    if (EXISTS ${picoVscode})
+        include(${picoVscode})
+    endif()
+
+    set(PICO_BOARD pico2 CACHE STRING "Board type")
+
+    cmake_minimum_required(VERSION 3.13)
+
+    # Pull in SDK (must be before project)
+    include(${CMAKE_CURRENT_LIST_DIR}/pico_sdk_import.cmake)
+endif()
+
+project (Brico16Bits C CXX ASM)
+
+if (BRICO16BITS_STANDALONE)
+    set(CMAKE_C_STANDARD 11)
+    set(CMAKE_CXX_STANDARD 17)
+    pico_sdk_init()
+endif()
+
+# Firmware version, displayed at startup. Overridden by the release workflow (-DBRICO16BITS_VERSION=v1.x)
+set(BRICO16BITS_VERSION "dev" CACHE STRING "Firmware version string")
 
 set (COMMANDS_CPP
     Commands/Command.cpp Commands/CommandBankLoadBank.cpp Commands/CommandBankStoreBank.cpp Commands/CommandSetRomWord.cpp Commands/CommandSendROMPart.cpp Commands/CommandReadWord.cpp Commands/CommandReadWords.cpp Commands/CommandTrace.cpp Commands/CommandFree.cpp Commands/CommandFreq.cpp Commands/CommandClearBuffer.cpp
@@ -93,6 +129,8 @@ add_compile_definitions(BUILD_DATE_TIME_MINUTES=${BUILD_DATE_TIME_MINUTES_NEW})
 string(TIMESTAMP BUILD_DATE_TIME_SECONDS %S)
 math(EXPR BUILD_DATE_TIME_SECONDS_NEW "${BUILD_DATE_TIME_SECONDS}" OUTPUT_FORMAT DECIMAL)
 add_compile_definitions(BUILD_DATE_TIME_SECONDS=${BUILD_DATE_TIME_SECONDS_NEW})
+
+add_compile_definitions(FIRMWARE_VERSION="${BRICO16BITS_VERSION}")
 
 # Set USB device name
 add_compile_definitions(USBD_PRODUCT="BricoNeo")

@@ -1,0 +1,122 @@
+name: Build and release (Pico 2 ARM)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'Images/**'
+      - 'LICENSE'
+      - '.claude/**'
+  workflow_dispatch:
+
+# Avoid two releases computing the same version number
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  PICO_SDK_VERSION: 2.3.0
+  PICOTOOL_VERSION: 2.3.0
+  ARM_GCC_VERSION: 15.2.rel1
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed to see existing tags
+
+      # ---------- Toolchain (cached) ----------
+      - name: Cache Arm GNU toolchain
+        id: cache-gcc
+        uses: actions/cache@v4
+        with:
+          path: ~/arm-gcc
+          key: arm-gcc-${{ env.ARM_GCC_VERSION }}
+
+      - name: Download Arm GNU toolchain
+        if: steps.cache-gcc.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/arm-gcc
+          curl -fsSL "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_GCC_VERSION}/binrel/arm-gnu-toolchain-${ARM_GCC_VERSION}-x86_64-arm-none-eabi.tar.xz" \
+            | tar -xJ -C ~/arm-gcc --strip-components=1
+
+      - name: Add toolchain to PATH
+        run: echo "$HOME/arm-gcc/bin" >> "$GITHUB_PATH"
+
+      # ---------- Pico SDK (cached) ----------
+      - name: Cache Pico SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/pico-sdk
+          key: pico-sdk-${{ env.PICO_SDK_VERSION }}
+
+      - name: Clone Pico SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$PICO_SDK_VERSION" https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+          git -C ~/pico-sdk submodule update --init --depth 1
+
+      # ---------- picotool (cached, needed to produce the .uf2) ----------
+      - name: Cache picotool
+        id: cache-picotool
+        uses: actions/cache@v4
+        with:
+          path: ~/picotool-install
+          key: picotool-${{ env.PICOTOOL_VERSION }}-${{ runner.os }}
+
+      - name: Build picotool
+        if: steps.cache-picotool.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$PICOTOOL_VERSION" https://github.com/raspberrypi/picotool.git ~/picotool-src
+          cmake -S ~/picotool-src -B ~/picotool-build \
+            -DPICO_SDK_PATH="$HOME/pico-sdk" \
+            -DPICOTOOL_NO_LIBUSB=1 \
+            -DPICOTOOL_FLAT_INSTALL=1 \
+            -DCMAKE_INSTALL_PREFIX="$HOME/picotool-install" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build ~/picotool-build -j"$(nproc)"
+          cmake --install ~/picotool-build
+
+      # ---------- Version ----------
+      - name: Compute next version (v1.N)
+        id: version
+        run: |
+          last=$(git tag -l 'v1.*' | sed -n 's/^v1\.\([0-9]\+\)$/\1/p' | sort -n | tail -1)
+          next=$(( ${last:--1} + 1 ))
+          echo "version=v1.${next}" >> "$GITHUB_OUTPUT"
+          echo "Next version: v1.${next}"
+
+      # ---------- Build ----------
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$HOME/pico-sdk" \
+            -DPICO_BOARD=pico2 \
+            -DPICO_PLATFORM=rp2350-arm-s \
+            -Dpicotool_DIR="$HOME/picotool-install/picotool" \
+            -DBRICO16BITS_VERSION="${{ steps.version.outputs.version }}"
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      # ---------- Release ----------
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cp build/Brico16Bits.uf2 "Brico16Bits-${VERSION}-pico2.uf2"
+          gh release create "$VERSION" \
+            "Brico16Bits-${VERSION}-pico2.uf2" \
+            --target "$GITHUB_SHA" \
+            --title "BricoNeo ${VERSION}" \
+            --generate-notes
