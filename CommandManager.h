@@ -16,6 +16,7 @@ public:
     static bool GetChar(char *received);
     static char GetCharBlocking();
     static void PrintAsyncMessage(const char *format, ...);
+    static bool PopPendingMessages(char *buffer, int bufferSize);
 private:
     static Command * (* gaBuiltInCommandConstructors [])();
     static bool gbPromptDisplayedOnce;

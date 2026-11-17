@@ -13,7 +13,8 @@ const char *OpcodeDecoder::maConditionalTestsTable[] =
 };
 
 OpcodeDecoder::OpcodeDecoder(uint16_t *binCode, int *binCodePosition, char *opcodeDestination)
-: mpbBincode(binCode), mpnBincodePosition(binCodePosition), mszOpcodeDestination(opcodeDestination)
+: mpbBincode(binCode), mpnBincodePosition(binCodePosition), mszOpcodeDestination(opcodeDestination),
+  mnCurrentOpcode(0), mnDataByteSize(0)
 {
 }
 

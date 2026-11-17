@@ -96,7 +96,7 @@ Commands are grouped in sections, exactly as shown by the `?` command:
 | `BootSel` | | Reboot into USB bootloader mode to flash new firmware |
 | `;` | `<text>` | Comment, ignored |
 | `Delay` | `x` | Wait `x` milliseconds |
-| `Dbg` | | Enter the live 68000 debugger (see [below](#diagnostics-bus-tracing-frequency-counter-live-68000-debugger)) |
+| `Dbg` | `[tui]` | Enter the live 68000 debugger (see [below](#diagnostics-bus-tracing-frequency-counter-live-68000-debugger)). `Dbg tui` opens the full screen view |
 
 ### ROM images management
 ROM images are stored in 4 flash banks; bank 0 is loaded automatically at startup.
@@ -165,6 +165,8 @@ cat UNIBIOS4.BIN > /dev/cu.usbmodemXXXX3  (macOS)
 - **`Trace on`** starts recording every address the Neo Geo requests on the bus into the input buffer (stops automatically once the buffer is full); `Trace off` reverts to normal buffer behaviour. Read the captured addresses back with `ReadWords`.
 - **`Freq`** reads the frequency present on the extension input pin (or its logic level, below 100 Hz) — useful to check that a clock or sync signal is actually toggling on a suspect board.
 - **`Dbg`** turns BricoNeo into a live 68000 debugger: it patches a conventional Neo Geo system ROM's TRACE interrupt vector (or expects a ROM that already declares one), resets the board, then shows, frame by frame, all data/address registers, the status register flags (T/S/IRQ/X/N/Z/V/C), the program counter and a short disassembly of the upcoming instructions. Press `s`/space to single-step, `c` to run to the next breakpoint/trace event, `x` to exit.
+
+  **Full screen view** — `Dbg tui` opens the same debugger as a full screen terminal UI: registers, flags and disassembly stay in place, and the registers and flags modified by the last step are highlighted. Background messages (ROM received...) go to a message line instead of breaking the screen. Press `t` (or F2) at any time to switch between the classic and the full screen views: the full screen view uses the terminal alternate screen, so the classic console comes back exactly as it was. Keys: `s`/space/Enter step, `c`/F5 continue, `r` redraw, `x`/Esc exit. The view adapts to the window size and follows its resizing (the size is polled every 500 ms, there is no resize notification on a serial line): wider windows give more room to the boxes and the disassembly, taller ones show more instructions (up to 25). It needs an ANSI terminal of at least 80x24 (PuTTY, Tera Term, Windows Terminal, GNU `screen`...); basic serial monitors without ANSI support should stick to the classic view. With GNU `screen` (macOS / Linux), add `altscreen on` to your `~/.screenrc`: alternate screen support is off by default in `screen`. Without it, the classic console is not restored when leaving the full screen view: BricoNeo detects it and continues below the last debugger screen.
 
 ![BricoNeo board](Images/Trace.png)
 
@@ -236,6 +238,9 @@ BricoExtManager            Reads a BricoNeo-aware ROM's extension table
 MassStorageManager         USB mass-storage (drag & drop ROM loading) implementation
 OpcodeDecoder               Minimal 68000 disassembler used by the live debugger
 DisplayResult / InputBuffer Console output formatting and Neo Geo -> PC buffer
+Tui                        Minimal full screen terminal UI layer (alternate screen, drawing, key decoding)
+Commands/DebugTuiView      Full screen view of the live debugger (Dbg tui)
+Commands/DebugFrame        Debug frame structure and disassembly shared by both debugger views
 ```
 
 ## Some videos showing the board in action
