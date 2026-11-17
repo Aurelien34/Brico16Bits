@@ -39,13 +39,13 @@ set(BRICO16BITS_VERSION "dev" CACHE STRING "Firmware version string")
 set (COMMANDS_CPP
     Commands/Command.cpp Commands/CommandBankLoadBank.cpp Commands/CommandBankStoreBank.cpp Commands/CommandSetRomWord.cpp Commands/CommandSendROMPart.cpp Commands/CommandReadWord.cpp Commands/CommandReadWords.cpp Commands/CommandTrace.cpp Commands/CommandFree.cpp Commands/CommandFreq.cpp Commands/CommandClearBuffer.cpp
     Commands/CommandLs.cpp Commands/CommandReset.cpp Commands/CommandDelay.cpp
-    Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandDebug.cpp Commands/CommandComment.cpp Commands/CommandListRoms.cpp
+    Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandDebug.cpp Commands/CommandComment.cpp Commands/CommandListRoms.cpp Commands/DebugTuiView.cpp Commands/DebugFrame.cpp
     )
 
 set (COMMANDS_H
     Commands/Command.h Commands/CommandBankLoadBank.h Commands/CommandBankStoreBank.h Commands/CommandSetRomWord.h Commands/CommandSendROMPart.h Commands/CommandReadWord.h Commands/CommandReadWords.h Commands/CommandTrace.h Commands/CommandFree.h Commands/CommandFreq.h Commands/CommandClearBuffer.h
     Commands/CommandLs.h Commands/CommandReset.h Commands/CommandDelay.h
-    Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandDebug.h Commands/CommandComment.h Commands/CommandListRoms.h
+    Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandDebug.h Commands/CommandComment.h Commands/CommandListRoms.h Commands/DebugTuiView.h Commands/DebugFrame.h
     )
 
 set (COMMANDS_68K_CPP
@@ -72,7 +72,8 @@ set (SRC Brico16Bits.cpp
     TinyMassStorage.cpp 
     CommandManager68k.cpp
     NeoDiagImageBuilder.cpp
-    OpcodeDecoder.cpp)
+    OpcodeDecoder.cpp
+    Tui.cpp)
 
     set (HEADERS StateMachinesDefinitions.h MemoryMap.h
     PioBusAccess.pio.h PioBusWatcherAddresses.pio.h PioBusWatcherPort.pio.h
@@ -84,7 +85,8 @@ set (SRC Brico16Bits.cpp
     ROMUploadManager.h
     CommandManager68k.h
     NeoDiagImageBuilder.h
-    OpcodeDecoder.h)
+    OpcodeDecoder.h
+    Tui.h)
 
 add_executable(Brico16Bits ${SRC} ${HEADERS})
 

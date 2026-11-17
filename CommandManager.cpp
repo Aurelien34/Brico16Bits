@@ -290,6 +290,20 @@ void CommandManager::PrintAsyncMessage(const char *format, ...)
     }
 }
 
+/// @brief Take the queued asynchronous messages out of the queue, for commands that display them themselves (full screen UI)
+/// @return true if there was at least one message. Messages are separated by '\n'
+bool CommandManager::PopPendingMessages(char *buffer, int bufferSize)
+{
+    if (gcPendingMessages[0] == 0 || bufferSize <= 0)
+    {
+        return false;
+    }
+    strncpy(buffer, gcPendingMessages, bufferSize - 1);
+    buffer[bufferSize - 1] = 0;
+    gcPendingMessages[0] = 0;
+    return true;
+}
+
 /// @brief Display queued asynchronous messages below the input line, then display the input line again
 /// so that the user sees the typing has been interrupted (no prompt in remote keyboard mode)
 void CommandManager::DisplayPendingMessages()
