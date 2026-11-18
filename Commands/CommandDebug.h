@@ -18,6 +18,9 @@ private:
     {
         None,
         Step,
+        StepOver,       // 'o' / F10
+        RunTo,          // 'g': run to an address
+        Break,          // 'b': request a break while running
         Continue,
         Exit,
         ToggleView,
@@ -41,6 +44,29 @@ private:
     void ShowFrameClassic(const DebugFrame *frame);
     /// @brief Classic view: one line of the Program box ("| -> " / "|    " prefix, address, text, words)
     void PrintInstructionClassic(const DisassembledInstruction *instruction, const char *prefix);
+
+    /// @brief What the 68k was asked to do before the current stop
+    enum class ResumeKind
+    {
+        None,       ///< First stop of the session
+        Step,       ///< STEP
+        RunUntil,   ///< RUN_UNTIL (step over or run to)
+        Continue,   ///< CONTINUE
+    };
+
+    /// @brief How the current stop was reached, for T10 (call stack: CallStack::OnStep / OnRunUntilReached / Invalidate).
+    /// Valid from the moment the stop is decoded until the next command. Updated in Execute() right before the history.
+    struct StopInfo
+    {
+        ResumeKind kind = ResumeKind::None;
+        bool bStepOver = false;         ///< kind == RunUntil: it was a step over (not a 'g')
+        uint32_t runUntilTarget = 0;    ///< kind == RunUntil: PC argument
+        uint32_t runUntilMinSp = 0;     ///< kind == RunUntil: minimum SP argument (the 68k compares SSP before the exception)
+        /// kind == RunUntil: stopped on the target (PC == target and SSP >= minimum SP). false: break, or another
+        /// breakpoint / trace event, the call stack must be invalidated.
+        bool bReachedTarget = false;
+    };
+    StopInfo mStop;
 
     /// @brief Instructions executed before the current stop (see ExecutionHistory). Cleared at the start of Dbg, after
     /// CONTINUE and on any DebugLink error. T8 / T10: GetPrevious() gives the previous PC, SP (effective a7) and size.

@@ -302,6 +302,7 @@ void DebugTuiView::ShowFrame(const DebugFrame *frame, const DebugFrame *previous
     mpFrame = frame;
     mpPreviousFrame = previousFrame;
     mnStepCount = stepCount;
+    bool bHelpChanges = meState == State::Running;  // The help bar depends on the Running state (see SetState)
     meState = State::Stopped;
     if (!Tui::IsActive() || !Tui::IsLargeEnough())
     {
@@ -311,15 +312,24 @@ void DebugTuiView::ShowFrame(const DebugFrame *frame, const DebugFrame *previous
     DrawRegisters();
     DrawStatus();
     DrawCode();
+    if (bHelpChanges)
+    {
+        DrawHelp();
+    }
     Tui::Flush();
 }
 
 void DebugTuiView::SetState(State state)
 {
+    bool bHelpChanges = (meState == State::Running) != (state == State::Running);   // The help bar depends on it
     meState = state;
     if (Tui::IsActive() && Tui::IsLargeEnough())
     {
         DrawTitle();
+        if (bHelpChanges)
+        {
+            DrawHelp();
+        }
         Tui::Flush();
     }
 }
@@ -420,13 +430,9 @@ void DebugTuiView::DrawTitle()
     Tui::PrintAt(ROW_TITLE, 2, "BricoNeo - 68000 live debugger");
     Tui::SetBold(false);
 
-    if (mpFrame != nullptr)
-    {
-        Tui::PrintAt(ROW_TITLE, mnColStatus, "frame #%-5u  steps %-6lu", mpFrame->frameNumber, (unsigned long)mnStepCount);
-    }
-
     const char *stateText;
     uint8_t stateColor;
+    char runningText[32];
     switch (meState)
     {
     case State::Stopped:
@@ -434,7 +440,15 @@ void DebugTuiView::DrawTitle()
         stateColor = COLOR_STATE_STOPPED;
         break;
     case State::Running:
-        stateText = " RUNNING ";
+        if (mbRunTargetValid)
+        {
+            snprintf(runningText, sizeof(runningText), " RUNNING (until $%06lx) ", (unsigned long)(mnRunTarget & 0xffffff));
+            stateText = runningText;
+        }
+        else
+        {
+            stateText = " RUNNING ";
+        }
         stateColor = COLOR_STATE_RUNNING;
         break;
     default:
@@ -442,9 +456,17 @@ void DebugTuiView::DrawTitle()
         stateColor = COLOR_STATE_WAITING;
         break;
     }
+
+    // The frame counters are not displayed if the (longer) state text would overlap them
+    int stateLength = (int)strlen(stateText);
+    if (mpFrame != nullptr && (int)mnColStatus + 26 < (int)mnScreenWidth - stateLength)
+    {
+        Tui::PrintAt(ROW_TITLE, mnColStatus, "frame #%-5u  steps %-6lu", mpFrame->frameNumber, (unsigned long)mnStepCount);
+    }
+
     Tui::SetColors(COLOR_BAR_FG, stateColor);
     Tui::SetBold(true);
-    Tui::PrintAt(ROW_TITLE, mnScreenWidth - 9, "%s", stateText);
+    Tui::PrintAt(ROW_TITLE, mnScreenWidth - stateLength, "%s", stateText);
     Tui::ResetAttributes();
 }
 
@@ -721,36 +743,66 @@ void DebugTuiView::DrawMessage()
 
 void DebugTuiView::DrawHelp()
 {
-    static const char *keys[][2] =
+    struct HelpKey
     {
-        { "s", "Step" },
-        { "c", "Cont" },
-        { "m", "Mem" },
-        { "w", "8/16" },
-        { "PgUp/Dn", "Scroll" },
-        { "F3", "Code/Mem" },
-        { "t", "View" },
-        { "x", "Exit" },
+        const char *key;
+        const char *label;
+        bool memoryKey;     // Only displayed when the memory monitor is enabled
     };
+    static const HelpKey keysStopped[] =
+    {
+        { "s", "Step", false },
+        { "o", "Over", false },
+        { "c", "Cont", false },
+        { "g", "Goto", false },
+        { "m", "Mem", false },
+        { "w", "8/16", true },
+        { "PgUp/Dn", "Scr", true },
+        { "F3", "Pane", true },
+        { "t", "View", false },
+        { "x", "Exit", false },
+    };
+    static const HelpKey keysRunning[] =
+    {
+        { "b", "Break", false },
+        { "t", "View", false },
+        { "x", "Exit", false },
+    };
+    const HelpKey *keys = meState == State::Running ? keysRunning : keysStopped;
+    unsigned count = meState == State::Running ? sizeof(keysRunning) / sizeof(keysRunning[0]) : sizeof(keysStopped) / sizeof(keysStopped[0]);
+
+    // Visible keys, and the width of the bar with two spaces between keys: one space if it does not fit
+    bool visible[sizeof(keysStopped) / sizeof(keysStopped[0])];
+    int width = 1;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        bool isF3 = strcmp(keys[i].key, "F3") == 0;
+        visible[i] = !(keys[i].memoryKey && !mbHasMemoryAddress) && !(isF3 && mbBothPanels);   // F3: nothing to toggle with both panels
+        if (visible[i])
+        {
+            width += (int)strlen(keys[i].key) + 1 + (int)strlen(keys[i].label) + 2;
+        }
+    }
+    const char *separator = width <= (int)mnScreenWidth - 2 ? "  " : " ";
+
     Tui::SetColors(COLOR_BAR_FG, COLOR_BAR_BG);
     // Last line of the screen: writing its last cell may scroll some terminals. Fill that cell with "erase to end
     // of line" instead, which uses the current background color on most terminals.
     Tui::FillLine(mnRowHelp, 1, mnScreenWidth - 1);
     Tui::ClearToEndOfLine();
     Tui::MoveTo(mnRowHelp, 2);
-    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
+    for (unsigned i = 0; i < count; ++i)
     {
-        bool memoryKey = strcmp(keys[i][0], "w") == 0 || strcmp(keys[i][0], "PgUp/Dn") == 0;
-        if ((memoryKey && !mbHasMemoryAddress) || (strcmp(keys[i][0], "F3") == 0 && (mbBothPanels || !mbHasMemoryAddress)))
+        if (!visible[i])
         {
-            continue;   // Monitor disabled, or both panels displayed (nothing to toggle)
+            continue;
         }
         Tui::SetForeground(COLOR_BAR_KEY);
         Tui::SetBold(true);
-        Tui::Print("%s", keys[i][0]);
+        Tui::Print("%s", keys[i].key);
         Tui::SetBold(false);
         Tui::SetForeground(COLOR_BAR_FG);
-        Tui::Print(" %s  ", keys[i][1]);
+        Tui::Print(" %s%s", keys[i].label, separator);
     }
     Tui::ResetAttributes();
 }

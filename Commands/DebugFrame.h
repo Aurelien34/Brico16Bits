@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "InstructionFlow.h"
+
 #define DEBUG_FRAME_CODE_WORDS 25
 #define DEBUG_INSTRUCTION_MAX_WORDS 5   // Longest 68000 instruction: opcode + 4 extension words
 #define DEBUG_INSTRUCTION_MAX_TEXT 100
@@ -80,6 +82,42 @@ inline bool GetBranchTarget(uint32_t address, const uint16_t *words, int wordCou
     }
     *target = (uint32_t)((int32_t)address + 2 + displacement) & 0xffffff;
     return true;
+}
+
+/// @brief Control flow category of an instruction, from its first word (extension words are not needed):
+/// Call (JSR with a control addressing mode, BSR 8 / 16-bit), Trap (TRAP #n, TRAPV), Loop (DBcc),
+/// Return (RTS, RTR, RTE), Other (everything else, including BRA, Bcc, JMP, STOP, RESET).
+/// Pure function (no decoder needed), tested on the host.
+/// @param words Instruction words, at least one
+inline InstructionFlow ClassifyInstruction(const uint16_t *words)
+{
+    uint16_t op = words[0];
+    if ((op & 0xffc0) == 0x4e80)
+    {
+        // JSR <ea>: only control addressing modes (An), d16(An), d8(An,Xn), abs.W, abs.L, d16(PC), d8(PC,Xn)
+        unsigned mode = (op >> 3) & 7;
+        unsigned reg = op & 7;
+        bool valid = mode == 2 || mode == 5 || mode == 6 || (mode == 7 && reg <= 3);
+        return valid ? InstructionFlow::Call : InstructionFlow::Other;
+    }
+    if ((op & 0xff00) == 0x6100)
+    {
+        // BSR.S (8-bit displacement), BSR.W ($6100 + word); $61FF (32-bit displacement) does not exist on 68000
+        return (op & 0xff) == 0xff ? InstructionFlow::Other : InstructionFlow::Call;
+    }
+    if ((op & 0xfff0) == 0x4e40 || op == 0x4e76)
+    {
+        return InstructionFlow::Trap;       // TRAP #n, TRAPV
+    }
+    if ((op & 0xf0f8) == 0x50c8)
+    {
+        return InstructionFlow::Loop;       // DBcc Dn,<disp>
+    }
+    if (op == 0x4e75 || op == 0x4e77 || op == 0x4e73)
+    {
+        return InstructionFlow::Return;     // RTS, RTR, RTE
+    }
+    return InstructionFlow::Other;
 }
 
 int DisassembleFrame(const DebugFrame *frame, DisassembledInstruction *instructions, int maxInstructions);

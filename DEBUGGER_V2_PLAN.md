@@ -444,6 +444,43 @@ Fichiers partagés, à ne jamais modifier en parallèle : `CommandDebug.*` (T5, 
 - Commits : un commit par phase validée (G1..G4) dans chacun des deux dépôts, une fois que
   l'utilisateur a donné son accord.
 
+## Pistes futures (non planifiées)
+
+### Step out exact côté 68k : commande `RUN_UNTIL_RETURN`
+Alternative au step out de T10, à envisager si, en G4, le step out basé sur `CallStack` se
+trompe trop souvent.
+
+- **Limite de T10** : le step out a besoin de l'adresse de retour à l'avance. Elle est exacte si
+  la pile fantôme est valide (fonction entrée en pas à pas). Après un break, un `g` ou un
+  `Breakpoint` dans le code, la pile fantôme est vide : on retombe sur la chaîne A6 (souvent
+  absente en asm sans `LINK` : Brico68k, la plupart des jeux) puis sur le scan de pile, qui peut
+  retenir une valeur résiduelle ou une adresse de retour plus ancienne. Le step out s'arrête alors
+  au mauvais endroit, ou jamais (il faut `b`). Même risque avec du code qui manipule la pile
+  (`pea x` + `rts`, sauts par table).
+- **Principe** : nouvelle commande, ARG1 = SP minimal (SP courant à l'arrêt). Dans la voie rapide,
+  à chaque trace, le handler lit l'opcode à l'adresse du PC empilé (instruction sur le point d'être
+  exécutée). Si c'est `RTS` (`$4E75`), `RTR` (`$4E77`) ou `RTE` (`$4E73`) et que
+  `SSP_INTERRUPTED >= ARG1`, il arme un indicateur ; à la trace suivante, il s'arrête (trame
+  d'arrêt normale). On est alors sur l'instruction de l'appelant qui suit le `jsr`/`bsr`.
+- **Pourquoi c'est exact** : les `rts` des fonctions appelées par la fonction courante
+  s'exécutent avec un SP plus bas que le SP courant (leur adresse de retour est empilée en plus),
+  ils sont ignorés ; le `rts` de la fonction courante s'exécute avec SP ≥ SP courant. Aucune
+  adresse à deviner, fonctionne après un break ou un `g`.
+- **Coûts** :
+  - protocole : `Trace.s`, `inc/trace.inc`, `DebugProtocol.h` (code de commande), un indicateur
+    « arrêt à la prochaine trace » ; retester les modes A et B comme en G1 ;
+  - taille du handler : `BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES` vaut désormais `$100` (et non
+    `$200`) ; vérifier la place restante pour le mode A ;
+  - vitesse : une lecture et une comparaison de plus par instruction dans la voie rapide, si elle
+    est partagée avec `RUN_UNTIL` (ralentit légèrement step over et `g`). T10 est plus rapide.
+- **Côté Pico** : `F11` / `u` enverrait cette commande au lieu de
+  `RUN_UNTIL(callers[0].returnAddress, frameSp + 4)` ; même touche, même affichage. Le panneau
+  « Callers » reste, à titre informatif. Après l'arrêt : `CallStack::OnRunUntilReached(newSp)`
+  (le cadre courant a été dépilé), historique avec `forceBreak=true` (ligne `<-` sur le `rts`).
+- **Variante sans toucher au 68k** : enchaîner des STEP côté Pico jusqu'à exécuter un `rts` au
+  bon niveau de SP. Exact aussi, mais un aller-retour par instruction : acceptable pour une
+  fonction courte, inutilisable avec une boucle.
+
 ## Défauts connus hors plan (ne pas corriger sans accord de l'utilisateur)
 
 ### Désassembleur : opcodes manquants dans `OpcodeDecoder.cpp`

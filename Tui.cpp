@@ -121,8 +121,10 @@ void Tui::Leave()
         MoveTo(gnSavedCursorRow == 1 ? 2 : 1, 1);
     }
 
-    // Back to the main screen: the terminal restores its content and the cursor position
-    printf("\e[?25h\e[?1049l");
+    // Back to the main screen: the terminal restores its content and the cursor position.
+    // The cursor is shown again AFTER the switch: some terminals (Tera Term) keep the visibility
+    // per screen buffer, so showing it before leaving the alternate screen has no lasting effect
+    printf("\e[?1049l\e[?25h");
     Flush();
 
     // Terminals without alternate screen (e.g. GNU screen without "altscreen on") ignore it: the full screen view
@@ -431,6 +433,12 @@ bool Tui::ReadLine(uint16_t row, uint16_t col, uint16_t width, char *buffer, siz
             Flush();
         }
     };
+    if (!gbActive)
+    {
+        // Classic console: make sure the terminal cursor is visible while typing
+        printf("\e[?25h");
+        Flush();
+    }
     redraw();
 
     while (true)

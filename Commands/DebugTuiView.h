@@ -75,6 +75,9 @@ public:
     void Redraw(bool querySize = true);
     void ShowFrame(const DebugFrame *frame, const DebugFrame *previousFrame, uint32_t stepCount);
     void SetState(State state);
+    /// @brief Target of the running RUN_UNTIL, shown in the title bar while Running ("Running (until $xxxxxx)").
+    /// Call before SetState(Running). hasTarget false: plain "Running" (CONTINUE).
+    void SetRunTarget(bool hasTarget, uint32_t target) { mbRunTargetValid = hasTarget; mnRunTarget = target; }
     /// @brief History displayed above the current instruction in the Program panel (nullptr: none). Must stay valid;
     /// set before ShowFrame().
     void SetHistory(const ExecutionHistory *history) { mpHistory = history; }
@@ -121,6 +124,8 @@ private:
     const ExecutionHistory *mpHistory = nullptr;
     uint32_t mnStepCount = 0;
     State meState = State::Waiting;
+    bool mbRunTargetValid = false;
+    uint32_t mnRunTarget = 0;
     char mszMessage[160] = "";
     bool mbMessageIsError = false;
 

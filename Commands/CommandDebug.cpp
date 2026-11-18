@@ -21,11 +21,12 @@
 #include "ROMUploadManager.h"
 #include "Tui.h"
 #include "TraceRoutine.h"
+#include <pico/stdlib.h>
 
 #define COMMAND_NAME "Dbg"
 
 #define COMMAND_DESC_PARAMETERS "[tui]"
-#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s step, c continue, m memory address (empty = off; hex, $hex, d0-d7, a0-a7, sp, pc, +/-hex; 'a0' is the register, '$a0' the address), w 8/16-bit, PgUp/PgDn scroll, F3 code/mem, x exit"
+#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s step, o/F10 step over, c continue, g run to address, b break, m memory address (empty = off; hex, $hex, d0-d7, a0-a7, sp, pc, +/-hex), w 8/16-bit, PgUp/PgDn scroll, F3 code/mem, x exit"
 static_assert(sizeof(COMMAND_DESC_TEXT) <= COMMAND_MAX_LENGTH_DESC_TEXT, "Command description too long");
 
 static_assert(TRACE_ROUTINE_SIZE_BYTES <= BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES, "TRACE handler too big for the BIOS patch area");
@@ -167,7 +168,60 @@ struct CommandDebug::WaitContext
     DebugLink *link;
     const DebugFrame *pFrameToShow;  ///< Frame shown if the view is toggled while waiting (nullptr if none)
     uint32_t nUnrecognizedSeen;
+    bool bBreakAllowed;              ///< The 68k is running after a resume: 'b' requests a break
 };
+
+/// @brief Time allowed for the 68k to stop after a break request when leaving the debugger
+#define EXIT_BREAK_TIMEOUT_MS 500
+
+/// @brief State of the poll callback used while stopping the 68k before exit
+struct ExitWaitContext
+{
+    DebugTuiView *view;
+    uint64_t deadlineUs;
+};
+
+/// @brief Poll callback of the wait for the final stop: background tasks only, keys are drained and ignored (no
+/// second exit), gives up at the deadline
+static bool PollExitWaiting(void *context)
+{
+    ExitWaitContext *ctx = (ExitWaitContext *)context;
+    MassStorageManager::Loop();
+    ROMUploadManager::Loop();
+    Tui::KeyEvent key;
+    while (Tui::ReadKey(&key)) { }
+    return time_us_64() < ctx->deadlineUs;
+}
+
+/// @brief Address where a step over must stop, if the instruction at PC is a call, a trap or a loop (DBcc).
+/// @param frame Current stop
+/// @param pNext Receives PC + instruction size (24 bits)
+/// @return false if a plain STEP must be used: other instruction, undecoded ("Unknown") or truncated, so that its size
+/// is not reliable. TRAPV is the only exception: not decoded by OpcodeDecoder, but known to be one word.
+static bool GetStepOverTarget(const DebugFrame *frame, uint32_t *pNext)
+{
+    static DisassembledInstruction instruction;     // Static: too large for the stack
+    if (DisassembleFrame(frame, &instruction, 1) != 1 || instruction.wordCount < 1 || instruction.truncated)
+    {
+        return false;
+    }
+    InstructionFlow flow = ClassifyInstruction(instruction.words);
+    if (flow != InstructionFlow::Call && flow != InstructionFlow::Trap && flow != InstructionFlow::Loop)
+    {
+        return false;
+    }
+    uint32_t size = (uint32_t)instruction.wordCount * 2;
+    if (strcmp(instruction.text, "Unknown") == 0)
+    {
+        if (instruction.words[0] != 0x4e76)     // TRAPV
+        {
+            return false;
+        }
+        size = 2;
+    }
+    *pNext = (frame->pc + size) & 0xffffff;
+    return true;
+}
 
 void CommandDebug::GetCommandName(char *name) const
 {
@@ -259,7 +313,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
 
     MemoryState memory;
     mHistory.Clear();
-    bool bLastCommandWasStep = false;   // The next stop follows a STEP: the instruction just left was executed
+    mStop = StopInfo();
     DebugTuiView view;
     view.SetHistory(&mHistory);
     view.SetMemoryWordMode(memory.words);
@@ -276,7 +330,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     DebugFrame *pPreviousFrame = nullptr;
     uint32_t nStepCount = 0;
     uint16_t nFrameNumber = 0;  // Stop counter (+1 per stop)
-    WaitContext waitContext = { this, &view, &link, nullptr, 0 };
+    WaitContext waitContext = { this, &view, &link, nullptr, 0, false };
 
     auto showMessage = [&](const char *text, bool isError)
     {
@@ -420,12 +474,47 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     {
         // Wait for a stop frame from the 68k...
         waitContext.pFrameToShow = nStepCount > 0 ? pPreviousFrame : nullptr;
+        waitContext.bBreakAllowed = mStop.kind != ResumeKind::None && nStepCount > 0;
         DebugStop stop;
         if (!link.WaitStop(&stop, PollWaiting, &waitContext))
         {
             mHistory.Clear();
+            // 'x' while a STEP / RUN_UNTIL is in progress: the 68k is still traced and would freeze in the handler at its
+            // next stop. Ask for a break, wait for that stop and let it go untraced (CONTINUE). Not needed after
+            // CONTINUE (T already 0) nor before the first frame (nothing resumed yet).
+            bool bLeftTraced = false;
+            bool bTraced = nStepCount > 0 && (mStop.kind == ResumeKind::RunUntil || mStop.kind == ResumeKind::Step);
+            if (bTraced && link.GetLastError() == DebugLinkError::Aborted)
+            {
+                if (Tui::IsActive())
+                {
+                    view.SetMessage("Exit: stopping the 68k...");
+                }
+                else
+                {
+                    printf("> stopping the 68k before exit...\n");
+                }
+                link.RequestBreak();
+                ExitWaitContext exitContext = { &view, time_us_64() + EXIT_BREAK_TIMEOUT_MS * 1000 };
+                DebugStop exitStop;
+                if (link.WaitStop(&exitStop, PollExitWaiting, &exitContext))
+                {
+                    link.Resume(DebugCommand::Continue);
+                }
+                else
+                {
+                    bLeftTraced = true;
+                }
+            }
             view.Leave();
-            snprintf(returnMessage, messageMaxSize, "User interrupted debug frame download");
+            if (bLeftTraced)
+            {
+                snprintf(returnMessage, messageMaxSize, "User interrupted, but the 68k did not stop: it may still be in trace mode (reset the board or run Dbg again)");
+            }
+            else
+            {
+                snprintf(returnMessage, messageMaxSize, "User interrupted debug frame download");
+            }
             InputBuffer::Clear(true);
             return false;
         }
@@ -461,9 +550,18 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         }
         ++nStepCount;
 
-        // History: after a STEP, the instruction executed is the first one of the previous stop (same words and text,
-        // no extra memory read). After anything else (first stop, continue) there is no history.
-        if (!bLastCommandWasStep || pPreviousFrame == nullptr)
+        // How was this stop reached? For a RUN_UNTIL: on its target (PC == target and SSP >= minimum SP, the 68k
+        // condition) or elsewhere (break, other breakpoint / trace event).
+        // T10 hook: here call CallStack::OnStep (kind Step), OnRunUntilReached(pFrame->a[7]) (kind RunUntil and
+        // bReachedTarget), Invalidate() (Continue, 'g', RunUntil not reached). The previous stop is pPreviousFrame.
+        mStop.bReachedTarget = mStop.kind == ResumeKind::RunUntil && regs.pc == mStop.runUntilTarget && regs.ssp >= mStop.runUntilMinSp;
+
+        // History: after a STEP, or a step over stopped on its target, the instruction executed is the first one of the
+        // previous stop (same words and text, no extra memory read): after a step over it is marked as a flow break so
+        // that the skipped jsr / bsr / dbcc is displayed as a "from" line. After anything else (first stop, continue,
+        // 'g', break, RUN_UNTIL stopped elsewhere) there is no history.
+        bool bStepOverReached = mStop.kind == ResumeKind::RunUntil && mStop.bStepOver && mStop.bReachedTarget;
+        if ((mStop.kind != ResumeKind::Step && !bStepOverReached) || pPreviousFrame == nullptr)
         {
             mHistory.Clear();
         }
@@ -473,7 +571,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
             static DisassembledInstruction executed;
             if (DisassembleFrame(pPreviousFrame, &executed, 1) == 1)
             {
-                mHistory.Push(executed, pPreviousFrame->a[7]);
+                mHistory.Push(executed, pPreviousFrame->a[7], bStepOverReached);
             }
         }
 
@@ -493,6 +591,9 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         // Wait for a user command
         bool bWaiting = true;
         DebugCommand debugCommand = DebugCommand::Step;
+        uint32_t runUntilTarget = 0;
+        uint32_t runUntilMinSp = 0;
+        bool bStepOver = false;
         while (bWaiting)
         {
             ServiceBackgroundTasks(view);
@@ -507,15 +608,83 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 debugCommand = DebugCommand::Step;
                 bWaiting = false;
                 break;
-            case Action::Continue:
-                if (Tui::IsActive())
+            case Action::StepOver:
+            {
+                uint32_t next;
+                if (GetStepOverTarget(pFrame, &next))
                 {
-                    view.SetState(DebugTuiView::State::Running);
-                    view.SetMessage("Running... the view will be updated if the 68k enters trace mode again");
+                    debugCommand = DebugCommand::RunUntil;
+                    runUntilTarget = next;
+                    runUntilMinSp = pFrame->ssp;    // The 68k compares the SSP before the exception
+                    bStepOver = true;
+                    if (!Tui::IsActive())
+                    {
+                        printf("> step over, running until $%06lx ('b' to break, 'x' to exit)...\n", (unsigned long)next);
+                    }
                 }
                 else
                 {
-                    printf("> continue...\n");
+                    debugCommand = DebugCommand::Step;
+                    if (!Tui::IsActive())
+                    {
+                        printf("> step\n");
+                    }
+                }
+                bWaiting = false;
+                break;
+            }
+            case Action::RunTo:
+            {
+                char text[80];
+                bool validated;
+                if (Tui::IsActive())
+                {
+                    validated = view.PromptInput("Run to address (hex, $hex, a0-a7, pc, a6-$10): ", text, sizeof(text), IdleWhilePrompting);
+                }
+                else
+                {
+                    printf("Run to address: hex, $hex, 0xhex, d0-d7, a0-a7, sp, pc, optional +/-hex ('a0' = register, '$a0' = address).\n"
+                           "Enter alone or Esc = cancel.\naddress> ");
+                    Tui::Flush();
+                    validated = Tui::ReadLine(0, 0, 0, text, sizeof(text), IdleWhilePrompting);
+                }
+                if (!validated || text[0] == 0)
+                {
+                    break;
+                }
+                uint32_t value;
+                if (!DebugExpression::Parse(text, pFrame, &value))
+                {
+                    char error[120];
+                    snprintf(error, sizeof(error), "Invalid address expression: '%.60s'", text);
+                    showMessage(error, true);
+                    break;
+                }
+                value &= 0xffffff;
+                if (value & 1)
+                {
+                    showMessage("Odd address: the PC is always even", true);
+                    break;
+                }
+                debugCommand = DebugCommand::RunUntil;
+                runUntilTarget = value;
+                runUntilMinSp = 0;
+                bStepOver = false;
+                if (!Tui::IsActive())
+                {
+                    printf("> run to $%06lx ('b' to break, 'x' to exit)...\n", (unsigned long)value);
+                }
+                bWaiting = false;
+                break;
+            }
+            case Action::Continue:
+                if (Tui::IsActive())
+                {
+                    view.SetMessage("Running... 'b' = break (needs the 68k in trace mode), 'x' = exit");
+                }
+                else
+                {
+                    printf("> continue ('b' to break, 'x' to exit)...\n");
                 }
                 debugCommand = DebugCommand::Continue;
                 bWaiting = false;
@@ -579,17 +748,29 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         // The displayed frame becomes the reference for highlighting changes
         pPreviousFrame = pFrame;
         pFrame = (pFrame == &frames[0]) ? &frames[1] : &frames[0];
-        view.SetState(debugCommand == DebugCommand::Continue ? DebugTuiView::State::Running : DebugTuiView::State::Waiting);
+        bool bRunning = debugCommand != DebugCommand::Step;
+        view.SetRunTarget(debugCommand == DebugCommand::RunUntil, runUntilTarget);
+        view.SetState(bRunning ? DebugTuiView::State::Running : DebugTuiView::State::Waiting);
+        if (debugCommand == DebugCommand::RunUntil && Tui::IsActive())
+        {
+            view.SetMessage("Running... 'b' = break, 'x' = exit");
+        }
 
-        // After CONTINUE the next stop is a break: no history. After a STEP, the history is kept until the next stop.
-        bLastCommandWasStep = debugCommand == DebugCommand::Step;
-        if (!bLastCommandWasStep)
+        // What the next stop will be the consequence of. The history is kept until that stop (STEP and step over: the
+        // executed instruction is pushed there), it is cleared there for anything else.
+        mStop = StopInfo();
+        mStop.kind = debugCommand == DebugCommand::Step ? ResumeKind::Step :
+            (debugCommand == DebugCommand::RunUntil ? ResumeKind::RunUntil : ResumeKind::Continue);
+        mStop.bStepOver = bStepOver;
+        mStop.runUntilTarget = runUntilTarget;
+        mStop.runUntilMinSp = runUntilMinSp;
+        if (mStop.kind == ResumeKind::Continue || (mStop.kind == ResumeKind::RunUntil && !bStepOver))
         {
             mHistory.Clear();
         }
 
         // Send the command to the 68k
-        link.Resume(debugCommand);
+        link.Resume(debugCommand, runUntilTarget, runUntilMinSp);
     }
 
     return true;
@@ -635,6 +816,20 @@ bool CommandDebug::PollWaiting(void *context)
     case Action::Resize:
         ctx->view->Redraw(false);
         break;
+    case Action::Break:
+        if (ctx->bBreakAllowed)
+        {
+            ctx->link->RequestBreak();
+            if (Tui::IsActive())
+            {
+                ctx->view->SetMessage("Break requested: waiting for the 68k to enter the handler...");
+            }
+            else
+            {
+                printf("> break requested...\n");
+            }
+        }
+        break;
     default:
         break;
     }
@@ -678,6 +873,8 @@ CommandDebug::Action CommandDebug::ReadAction()
         return Action::Step;
     case Tui::Key::F5:
         return Action::Continue;
+    case Tui::Key::F10:
+        return Action::StepOver;
     case Tui::Key::F2:
         return Action::ToggleView;
     case Tui::Key::F3:
@@ -699,6 +896,12 @@ CommandDebug::Action CommandDebug::ReadAction()
         {
         case 's': case 'S': case ' ':
             return Action::Step;
+        case 'o': case 'O':
+            return Action::StepOver;
+        case 'g': case 'G':
+            return Action::RunTo;
+        case 'b': case 'B':
+            return Action::Break;
         case 'c': case 'C':
             return Action::Continue;
         case 'x': case 'X': case 'q': case 'Q':
@@ -818,7 +1021,7 @@ void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
     }
 
     ShowSplitter();
-    printf("\n's' or space to step, 'c' to continue, 'm' for a memory dump (PgUp/PgDn to scroll, 'w' for 8/16-bit), 't' for the full screen view, 'x' to exit\n");
+    printf("\n's'/space step, 'o' step over, 'c' continue, 'g' run to address, 'm' memory dump (PgUp/PgDn scroll, 'w' 8/16-bit), 't' full screen view, 'x' exit\n");
 }
 
 void CommandDebug::PrintInstructionClassic(const DisassembledInstruction *instruction, const char *prefix)
