@@ -121,8 +121,10 @@ void Tui::Leave()
         MoveTo(gnSavedCursorRow == 1 ? 2 : 1, 1);
     }
 
-    // Back to the main screen: the terminal restores its content and the cursor position
-    printf("\e[?25h\e[?1049l");
+    // Back to the main screen: the terminal restores its content and the cursor position.
+    // The cursor is shown again AFTER the switch: some terminals (Tera Term) keep the visibility
+    // per screen buffer, so showing it before leaving the alternate screen has no lasting effect
+    printf("\e[?1049l\e[?25h");
     Flush();
 
     // Terminals without alternate screen (e.g. GNU screen without "altscreen on") ignore it: the full screen view
@@ -405,6 +407,99 @@ bool Tui::ReadKey(KeyEvent *event)
         break;
     }
     return true;
+}
+
+bool Tui::ReadLine(uint16_t row, uint16_t col, uint16_t width, char *buffer, size_t size, void (*idle)())
+{
+    if (size == 0)
+    {
+        return false;
+    }
+    size_t maxLength = size - 1;
+    if (gbActive && width > 0 && (size_t)(width - 1) < maxLength)
+    {
+        maxLength = width - 1;
+    }
+    size_t length = 0;
+    buffer[0] = 0;
+
+    auto redraw = [&]()
+    {
+        if (gbActive)
+        {
+            MoveTo(row, col);
+            printf("%s_", buffer);
+            RepeatChar(' ', (int)width - (int)length - 1);
+            Flush();
+        }
+    };
+    if (!gbActive)
+    {
+        // Classic console: make sure the terminal cursor is visible while typing
+        printf("\e[?25h");
+        Flush();
+    }
+    redraw();
+
+    while (true)
+    {
+        if (idle != nullptr)
+        {
+            idle();
+        }
+        KeyEvent key;
+        if (!ReadKey(&key))
+        {
+            continue;
+        }
+        switch (key.key)
+        {
+        case Key::Enter:
+            if (!gbActive)
+            {
+                printf("\r\n");
+                Flush();
+            }
+            return true;
+        case Key::Escape:
+            buffer[0] = 0;
+            if (!gbActive)
+            {
+                printf("\r\n");
+                Flush();
+            }
+            return false;
+        case Key::Backspace:
+            if (length > 0)
+            {
+                buffer[--length] = 0;
+                if (!gbActive)
+                {
+                    putchar_raw(0x08);
+                    putchar_raw(' ');
+                    putchar_raw(0x08);
+                    Flush();
+                }
+                redraw();
+            }
+            break;
+        case Key::Char:
+            if (key.c >= 0x20 && key.c < 0x7f && length < maxLength)
+            {
+                buffer[length++] = key.c;
+                buffer[length] = 0;
+                if (!gbActive)
+                {
+                    putchar_raw(key.c);
+                    Flush();
+                }
+                redraw();
+            }
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 /// @brief Called after an ESC character has been received: decode the CSI (ESC [) or SS3 (ESC O) sequence that may follow
