@@ -26,7 +26,7 @@
 #define COMMAND_NAME "Dbg"
 
 #define COMMAND_DESC_PARAMETERS "[tui]"
-#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s/F11 step, o/F10 step over, u step out, c continue, g run to addr, b break, m memory address (empty = off; hex, $hex, d0-a7, sp, pc, +/-hex), w 8/16-bit, PgUp/Dn scroll, F3 code/mem, x exit"
+#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s/F11 step, o/F10 step over, u step out, c continue, g run to addr, b break, m memory address (empty = off; hex, $hex, d0-a7, sp, pc, +/-hex), w 8/16-bit, e write, PgUp/Dn scroll, F3 code/mem, x exit"
 static_assert(sizeof(COMMAND_DESC_TEXT) <= COMMAND_MAX_LENGTH_DESC_TEXT, "Command description too long");
 
 static_assert(TRACE_ROUTINE_SIZE_BYTES <= BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES, "TRACE handler too big for the BIOS patch area");
@@ -118,6 +118,13 @@ static bool ReadMemoryZone(DebugLink &link, MemoryState &mem, int lines, bool bS
     return true;
 }
 
+/// @brief Classic view: remind the available keys (after a frame, a message or a dump, so the user always knows what
+/// can be done next)
+static void PrintHelpClassic()
+{
+    printf("\n's'/space step, 'o' step over, 'u' step out, 'c' continue, 'g' run to address, 'm' memory dump (PgUp/PgDn scroll, 'w' 8/16-bit), 'e' write memory, 't' full screen view, 'x' exit\n");
+}
+
 /// @brief Classic view: print the dump (hexadecimal + ASCII)
 static void PrintMemoryClassic(const MemoryState &mem, int lines)
 {
@@ -151,6 +158,85 @@ static void PrintMemoryClassic(const MemoryState &mem, int lines)
         ascii[MEMORY_BYTES_PER_LINE] = 0;
         printf(" %s\n", ascii);
     }
+}
+
+/// @brief Parsed 'e' command: "address value[.b|.w]"
+struct WriteCommand
+{
+    char addressText[48];
+    uint32_t value;
+    bool hasSize;   ///< A .b / .w suffix forces the size
+    bool word;      ///< Size forced by the suffix (valid if hasSize)
+};
+
+/// @brief Split "address value[.b|.w]" (two blank separated tokens). The value is hexadecimal, "$" / "0x" optional,
+/// at most 4 digits. The range depends on the size, which may come from the monitor mode: checked by the caller.
+/// @param error Receives the reason on failure
+static bool ParseWriteCommand(const char *text, WriteCommand *cmd, char *error, size_t errorSize)
+{
+    const char *p = text;
+    while (*p == ' ' || *p == '\t') { ++p; }
+    const char *addressStart = p;
+    while (*p != 0 && *p != ' ' && *p != '\t') { ++p; }
+    size_t addressLength = (size_t)(p - addressStart);
+    while (*p == ' ' || *p == '\t') { ++p; }
+    const char *valueStart = p;
+    while (*p != 0 && *p != ' ' && *p != '\t') { ++p; }
+    const char *valueEnd = p;
+    while (*p == ' ' || *p == '\t') { ++p; }
+    if (addressLength == 0 || valueStart == valueEnd || *p != 0)
+    {
+        snprintf(error, errorSize, "Expected: address value[.b|.w] (e.g. 100000 1234, a6-4 ff.b)");
+        return false;
+    }
+    if (addressLength >= sizeof(cmd->addressText))
+    {
+        snprintf(error, errorSize, "Address expression too long");
+        return false;
+    }
+    memcpy(cmd->addressText, addressStart, addressLength);
+    cmd->addressText[addressLength] = 0;
+
+    cmd->hasSize = false;
+    cmd->word = false;
+    if (valueEnd - valueStart >= 2 && valueEnd[-2] == '.' && strchr("bBwW", valueEnd[-1]) != NULL)
+    {
+        cmd->hasSize = true;
+        cmd->word = valueEnd[-1] == 'w' || valueEnd[-1] == 'W';
+        valueEnd -= 2;
+    }
+    if (valueEnd - valueStart >= 2 && valueStart[0] == '0' && (valueStart[1] == 'x' || valueStart[1] == 'X'))
+    {
+        valueStart += 2;
+    }
+    else if (valueStart < valueEnd && valueStart[0] == '$')
+    {
+        valueStart += 1;
+    }
+    if (valueStart == valueEnd)
+    {
+        snprintf(error, errorSize, "Missing value");
+        return false;
+    }
+    uint32_t value = 0;
+    for (const char *c = valueStart; c < valueEnd; ++c)
+    {
+        int lower = *c | 0x20;
+        int digit = (*c >= '0' && *c <= '9') ? *c - '0' : ((lower >= 'a' && lower <= 'f') ? lower - 'a' + 10 : -1);
+        if (digit < 0)
+        {
+            snprintf(error, errorSize, "Invalid hexadecimal value");
+            return false;
+        }
+        value = (value << 4) | (uint32_t)digit;
+        if (value > 0xffff)
+        {
+            snprintf(error, errorSize, "Value too large (max $FFFF)");
+            return false;
+        }
+    }
+    cmd->value = value;
+    return true;
 }
 
 /// @brief Background tasks while the user types in a prompt (the message line holds the prompt: no async messages)
@@ -503,6 +589,183 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 printf("%s\n", error);
             }
         }
+    };
+
+    // 'e' (T13): write one byte or word at an address, with read-back. The size is the memory monitor mode unless the
+    // value has a .b / .w suffix. $300000-$3FFFFF (I/O) needs a confirmation. Link errors (timeout...) are only
+    // reported, like a failed monitor read: the debugger stays usable and the 68k is still waiting in its handler.
+    auto handleWriteAction = [&]()
+    {
+        char text[80];
+        bool validated;
+        if (Tui::IsActive())
+        {
+            validated = view.PromptInput("Write (addr value[.b|.w]): ", text, sizeof(text), IdleWhilePrompting);
+        }
+        else
+        {
+            printf("Write: address value[.b|.w], hex ('$' / '0x' optional), address = expression (d0-d7, a0-a7, sp, pc, +/-hex).\n"
+                   "Size = %s unless .b / .w ('w' switches). Enter alone or Esc = cancel.\nwrite> ", memory.words ? "16-bit word" : "8-bit byte");
+            Tui::Flush();
+            validated = Tui::ReadLine(0, 0, 0, text, sizeof(text), IdleWhilePrompting);
+        }
+        if (!validated || text[0] == 0)
+        {
+            return;
+        }
+        char error[160];
+        WriteCommand cmd;
+        if (!ParseWriteCommand(text, &cmd, error, sizeof(error)))
+        {
+            showMessage(error, true);
+            return;
+        }
+        uint32_t address;
+        if (!DebugExpression::Parse(cmd.addressText, pFrame, &address))
+        {
+            snprintf(error, sizeof(error), "Invalid address expression: '%.60s'", cmd.addressText);
+            showMessage(error, true);
+            return;
+        }
+        bool word = cmd.hasSize ? cmd.word : memory.words;
+        if (!word && cmd.value > 0xff)
+        {
+            showMessage("Value too large for a byte (max $FF, use .w for a word)", true);
+            return;
+        }
+        uint32_t size = word ? 2 : 1;
+        uint32_t expected = word ? cmd.value : (cmd.value & 0xff);
+        // The refusals of DebugLink::WriteMemory, explained here
+        if (address > 0xffffffu)
+        {
+            showMessage("Address above $FFFFFF: the 68000 bus has 24 bits", true);
+            return;
+        }
+        if (word && (address & 1))
+        {
+            snprintf(error, sizeof(error), "Odd address $%06lx: a word write needs an even address (use .b)", (unsigned long)address);
+            showMessage(error, true);
+            return;
+        }
+        if (address >= 0xc00000u && address <= 0xcfffffu && ((address & 0x1fffe) == 0x1ff00 || (address & 0x1fffe) == 0x1ff02))
+        {
+            snprintf(error, sizeof(error), "$%06lx is a BricoExt port (or a mirror): never written", (unsigned long)address);
+            showMessage(error, true);
+            return;
+        }
+        bool bIo = address <= 0x3fffffu && address + size - 1 >= 0x300000u;
+        if (bIo)
+        {
+            char prompt[64];
+            snprintf(prompt, sizeof(prompt), "Write to I/O register $%06lx? (y/n): ", (unsigned long)address);
+            char answer[8];
+            if (Tui::IsActive())
+            {
+                validated = view.PromptInput(prompt, answer, sizeof(answer), IdleWhilePrompting);
+            }
+            else
+            {
+                printf("%s", prompt);
+                Tui::Flush();
+                validated = Tui::ReadLine(0, 0, 0, answer, sizeof(answer), IdleWhilePrompting);
+            }
+            if (!validated || (answer[0] != 'y' && answer[0] != 'Y'))
+            {
+                showMessage("Write cancelled", false);
+                return;
+            }
+        }
+        if (!link.WriteMemory(address, (uint16_t)cmd.value, word, bIo))
+        {
+            if (link.GetLastError() == DebugLinkError::InvalidArgument)
+            {
+                // Only remaining refusal: the handler stack [SSP - 66, SSP)
+                snprintf(error, sizeof(error), "$%06lx: refused, it overlaps the handler stack ($%06lx-$%06lx: saved registers and exception frame)",
+                    (unsigned long)address, (unsigned long)((pFrame->ssp - 66) & 0xffffff), (unsigned long)((pFrame->ssp - 1) & 0xffffff));
+            }
+            else
+            {
+                snprintf(error, sizeof(error), "Write at $%06lx failed: %s", (unsigned long)address, DebugLink::GetErrorText(link.GetLastError()));
+            }
+            showMessage(error, true);
+            return;
+        }
+
+        // Read-back (not in $3xxxxx: side effects). A byte is extracted from its containing word (big-endian).
+        char result[160];
+        int digits = word ? 4 : 2;
+        bool bResultIsError = false;
+        if (bIo)
+        {
+            snprintf(result, sizeof(result), "Written $%0*lx at $%06lx (I/O, not read back)", digits, (unsigned long)expected, (unsigned long)address);
+        }
+        else
+        {
+            uint16_t readWord;
+            if (!link.ReadMemory(address & ~1u, 1, &readWord, false))
+            {
+                snprintf(result, sizeof(result), "Written $%0*lx at $%06lx, read-back failed: %s", digits, (unsigned long)expected,
+                    (unsigned long)address, DebugLink::GetErrorText(link.GetLastError()));
+                bResultIsError = true;
+            }
+            else
+            {
+                uint32_t readBack = word ? readWord : ((address & 1) ? (readWord & 0xffu) : (uint32_t)(readWord >> 8));
+                if (readBack == expected)
+                {
+                    snprintf(result, sizeof(result), "Written $%0*lx at $%06lx", digits, (unsigned long)expected, (unsigned long)address);
+                }
+                else
+                {
+                    snprintf(result, sizeof(result), "Written $%0*lx at $%06lx but read back $%0*lx (ROM or not writable?)", digits,
+                        (unsigned long)expected, (unsigned long)address, digits, (unsigned long)readBack);
+                    bResultIsError = true;
+                }
+            }
+        }
+
+        // The code words read at PC: re-read them if overlapped (same stop: history, call stack and registers untouched)
+        if (pFrame->codeWords > 0 && address < pFrame->pc + (uint32_t)pFrame->codeWords * 2 && address + size > pFrame->pc)
+        {
+            if (link.ReadMemory(pFrame->pc, pFrame->codeWords, pFrame->code, false))
+            {
+                if (Tui::IsActive())
+                {
+                    view.ShowFrame(pFrame, pPreviousFrame, nStepCount);
+                }
+                else
+                {
+                    ShowFrameClassic(pFrame);
+                }
+            }
+            else
+            {
+                snprintf(result, sizeof(result), "Written at $%06lx, but the code at PC could not be re-read: %s", (unsigned long)address,
+                    DebugLink::GetErrorText(link.GetLastError()));
+                bResultIsError = true;
+            }
+        }
+        // The memory zone: replaced without shifting (the "previous" dump stays the one of the previous stop)
+        if (memory.hasAddress)
+        {
+            if (Tui::IsActive())
+            {
+                refreshMemory(false);
+            }
+            else if (address < memory.address + MEMORY_CLASSIC_LINES * MEMORY_BYTES_PER_LINE && address + size > memory.address)
+            {
+                char zoneError[160];
+                if (ReadMemoryZone(link, memory, MEMORY_CLASSIC_LINES, false, zoneError, sizeof(zoneError)))
+                {
+                    PrintMemoryClassic(memory, MEMORY_CLASSIC_LINES);
+                }
+                else
+                {
+                    printf("%s\n", zoneError);
+                }
+            }
+        }
+        showMessage(result, bResultIsError);
     };
 
     // Call stack analysis of the current stop (T10). Done only for what is displayed: the Callers panel (3 to 5 lines),
@@ -910,6 +1173,10 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                     refreshMemory(false);
                 }
                 break;
+            case Action::Write:
+                // T14: when the memory monitor is in edit mode, 'e' will enter / leave it instead (branch here)
+                handleWriteAction();
+                break;
             case Action::Memory:
             case Action::PageUp:
             case Action::PageDown:
@@ -919,6 +1186,18 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 break;
             default:
                 break;
+            }
+
+            // Classic view: after an action that stays at the stop and prints something (message, dump, cancelled
+            // prompt), remind the keys, otherwise the console ends on an empty line
+            // (step out without caller and a cancelled / refused run to also stay at the stop: bWaiting is still true)
+            bool bStaysAndPrints = action == Action::ToggleWords || action == Action::ToggleCode || action == Action::Write ||
+                action == Action::RunTo || action == Action::StepOut ||
+                action == Action::Memory || action == Action::PageUp || action == Action::PageDown ||
+                action == Action::LineUp || action == Action::LineDown;
+            if (bWaiting && !Tui::IsActive() && bStaysAndPrints)
+            {
+                PrintHelpClassic();
             }
         }
 
@@ -1097,6 +1376,8 @@ CommandDebug::Action CommandDebug::ReadAction()
             return Action::Memory;
         case 'w': case 'W':
             return Action::ToggleWords;
+        case 'e': case 'E':
+            return Action::Write;
         default:
             return Action::None;
         }
@@ -1221,7 +1502,7 @@ void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
     printf("|\n");
 
     ShowSplitter();
-    printf("\n's'/space step, 'o' step over, 'u' step out, 'c' continue, 'g' run to address, 'm' memory dump (PgUp/PgDn scroll, 'w' 8/16-bit), 't' full screen view, 'x' exit\n");
+    PrintHelpClassic();
 }
 
 void CommandDebug::PrintInstructionClassic(const DisassembledInstruction *instruction, const char *prefix)

@@ -178,6 +178,7 @@ cat UNIBIOS4.BIN > /dev/cu.usbmodemXXXX3  (macOS)
   | `b` | Break while running: stops at the next handler entry (needs trace mode in the code) |
   | `m` | Memory monitor: type an address (see below). Empty input turns it off, Esc cancels |
   | `w` | Switch the memory panel between 16-bit words (default) and bytes |
+  | `e` | Write memory: prompt `Write (addr value[.b|.w]): ` (see below). Empty input or Esc cancels |
   | PgUp / PgDn, Up / Down | Scroll the memory panel by a page / by a line of 16 bytes |
   | F3 | Switch between the code and memory panels on small terminals (under 32 lines) |
   | `t`, F2 | Switch between the classic and the full screen views |
@@ -187,6 +188,8 @@ cat UNIBIOS4.BIN > /dev/cu.usbmodemXXXX3  (macOS)
   **Addresses**: a hexadecimal number (`c0a000`, `$c0a000`, `0xc0a000`), a register (`d0`-`d7`, `a0`-`a7`, `sp`, `pc`), optionally followed by `+` or `-` and a hexadecimal offset (`a6-$10`). In the same prompt, `a0` is the register and `$a0` is the address $a0.
 
   **Memory monitor**: once an address is set, the memory panel is read at every stop. Bytes changed since the previous stop are highlighted. Reads of `$300000-$3FFFFF` and of the BricoExt ports (`$C1FF00`, `$C1FF02` and their mirrors) are refused, as reading them has side effects. The panel shows up to 32 lines (512 bytes); from 32 terminal lines, code and memory are displayed together.
+
+  **Memory write** (`e`): `address value[.b|.w]`, for example `100000 1234`, `a6-4 ff.b`. The address is an expression (registers allowed), the value is hexadecimal (`$` / `0x` optional, at most `$FF` for a byte, `$FFFF` for a word). The size follows the memory monitor mode (`w`: 16-bit words by default) unless a `.b` / `.w` suffix forces it. After the write, the unit is read back and reported (`Written $xx at $xxxxxx`, or a warning if the value read differs: ROM or not writable); the memory panel and, if the write overlaps the code read at PC, the disassembly are refreshed. A word write at an odd address, the BricoExt ports, an address above `$FFFFFF` and the handler's own stack (the 66 bytes below the stacked SSP: saved registers and exception frame) are refused with an explanation. A write to `$300000-$3FFFFF` (I/O registers) asks for a confirmation (`y`) and is not read back, as reading has side effects.
 
   **Execution history**: after a plain step through linear code, up to 2 previously executed instructions are shown dimmed above the current one. After a flow break (taken branch, `jsr`, `rts`, exception...), a single `<-` line shows the instruction that jumped. After a step out, the line reads `<- out of`. Branch targets are shown as `($xxxxxx)`. The history is cleared by `c`, `g`, a break and any communication error.
 

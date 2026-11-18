@@ -30,7 +30,8 @@ private:
         Resize,
         Memory,         // 'm': enter a memory address
         ToggleWords,    // 'w': 16-bit words / bytes
-        ToggleCode,     // F3: code / memory panel
+        Write,          // 'e': write memory (prompt)
+        ToggleCode,    // F3: code / memory panel
         PageUp,
         PageDown,
         LineUp,
