@@ -287,13 +287,49 @@ Le comportement doit être identique à la v1, dans les deux modes :
 - Mettre à jour la barre d'aide et le texte d'aide de la commande.
 - Fichiers : `DebugTuiView.*`, `CommandDebug.*`, `Tui.*`.
 
+- **Ajout demandé par l'utilisateur** : affichage par défaut en mots de 16 bits (8 mots par ligne,
+  big-endian, colonne ASCII conservée) ; la touche `w` bascule entre 16 et 8 bits, dans les deux
+  vues. En mode 16 bits, la surbrillance reste par octet (les 2 chiffres de l'octet modifié).
+- **Ajout demandé par l'utilisateur** : une saisie vide à l'invite de `m` désactive le moniteur
+  (plus aucune lecture à chaque arrêt) ; Échap annule sans rien changer. Désactivé (et au
+  démarrage), le panneau mémoire n'est pas affiché et le code prend toute la hauteur.
+
 #### G2 — Validation matérielle
 Dump RAM `$100000` pendant le pas à pas : les octets modifiés passent en jaune ; défilement ;
 bascule F3 ; dump d'une adresse cartouche.
 
+#### T7c — Instructions précédentes dans le désassemblage · Sonnet · dépendances : G2 (fichiers communs avec T7b)
+- Objectif : afficher les 1 ou 2 dernières instructions **exécutées** au-dessus de la ligne `->`.
+- **Pas de désassemblage à rebours** depuis le PC (longueur variable des instructions 68000,
+  valeurs immédiates qui ressemblent à des opcodes). On utilise l'historique des arrêts : après un
+  STEP, l'instruction exécutée est exactement la première `DisassembledInstruction` de l'arrêt
+  précédent (PC, mots, texte déjà disponibles).
+- `CommandDebug` tient un petit historique (2 entrées) d'instructions exécutées. Aucun
+  `READ_MEM` supplémentaire : les mots viennent de la trame précédente, donc on affiche ce qui a
+  réellement été exécuté, même si la banque ou la mémoire a changé depuis.
+- Affichage :
+  - enchaînement continu (PC courant = PC précédent + taille) : lignes affichées juste au-dessus
+    de `->`, atténuées, comme si le listing remontait ;
+  - après une rupture de flot (`bra`, `jsr`, `rts`, branchement pris, exception) : lignes
+    affichées quand même, séparées de `->` par un marqueur (`···`), pour signaler qu'on vient
+    d'ailleurs.
+  - TUI : intégré au panneau Program (`ComputeLayout()` inchangé : les lignes d'historique
+    remplacent des lignes de la fin du listing). Vue classique : 1 ou 2 lignes en plus, avant `->`.
+- Historique vidé après CONTINUE, au lancement de `Dbg`, et sur toute erreur de `DebugLink`.
+  (T8 ajoutera : vidé après `g` et break ; après un step over arrêté sur sa cible, l'instruction
+  sautée — le `jsr`/`bsr`/`trap`/`dbcc` — devient l'instruction précédente, marquée comme rupture.)
+- Exposer l'historique de façon réutilisable par T8 (taille de l'instruction précédente, PC et SP
+  précédents pour `CallStack::OnStep`).
+- Fichiers : `CommandDebug.*`, `DebugTuiView.*`.
+
+#### G2c — Validation matérielle (peut être regroupée avec G3)
+Pas à pas dans du code linéaire : les 2 instructions précédentes s'affichent au-dessus, sans
+marqueur ; pas à pas sur un `bra`/`jsr`/`rts` : marqueur de rupture ; après `c` puis arrêt :
+pas d'historique.
+
 ### Phase 3 — Step over / step out / break
 
-#### T8 — Commandes RUN_UNTIL côté Pico · Sonnet · dépendances : G1, T7b (fichiers communs)
+#### T8 — Commandes RUN_UNTIL côté Pico · Sonnet · dépendances : G1, T7c (fichiers communs)
 - Ajouter `DebugFrame.h` : `InstructionFlow ClassifyInstruction(const uint16_t *words)`, qui
   renvoie Call (`JSR`, `BSR`), Trap (`TRAP`, `TRAPV`), Loop (`DBcc`), Return (`RTS`, `RTR`, `RTE`)
   ou Other. L'enum existe déjà dans `Commands/InstructionFlow.h` (créé par T9) : l'inclure, ne
@@ -381,13 +417,14 @@ Vague 2 : T2, T4                                           — en parallèle
 Vague 3 : T3 relancé (header v2) → T5
 Vague 4 : T6 (revue) → corrections → G1
 Vague 5 : T7a ∥ T9  →  T7b  → G2
+Vague 5c : T7c → G2c (ou regroupée avec G3)
 Vague 6 : T8 → G3
 Vague 7 : T10 → G4
 Vague 8 : T11
 ```
 
-Fichiers partagés, à ne jamais modifier en parallèle : `CommandDebug.*` (T5, T7b, T8, T10),
-`DebugTuiView.*` (T5, T7b, T8, T10), `DebugFrame.*` (T5, T8), `CMakeLists.txt` de Brico16Bits
+Fichiers partagés, à ne jamais modifier en parallèle : `CommandDebug.*` (T5, T7b, T7c, T8, T10),
+`DebugTuiView.*` (T5, T7b, T7c, T8, T10), `DebugFrame.*` (T5, T8), `CMakeLists.txt` de Brico16Bits
 (T1, T4, T7a, T9 : ajout de fichiers ; regroupé par l'orchestrateur en cas de conflit).
 
 ## Points ouverts (utilisateur)

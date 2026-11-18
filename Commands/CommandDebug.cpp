@@ -11,6 +11,8 @@
 #include "CommandManager.h"
 #include "BricoExtManager.h"
 #include "DebugLink.h"
+#include "DebugExpression.h"
+#include "MemoryDump.h"
 #include "DebugProtocol.h"
 #include "InputBuffer.h"
 #include "MassStorageManager.h"
@@ -23,7 +25,8 @@
 #define COMMAND_NAME "Dbg"
 
 #define COMMAND_DESC_PARAMETERS "[tui]"
-#define COMMAND_DESC_TEXT "Enter 68000 debug mode. Need to activate trace mode in 68k code and declare TRACE interrupt vector. 'tui' for the full screen view"
+#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s step, c continue, m memory address (empty = off; hex, $hex, d0-d7, a0-a7, sp, pc, +/-hex; 'a0' is the register, '$a0' the address), w 8/16-bit, PgUp/PgDn scroll, F3 code/mem, x exit"
+static_assert(sizeof(COMMAND_DESC_TEXT) <= COMMAND_MAX_LENGTH_DESC_TEXT, "Command description too long");
 
 static_assert(TRACE_ROUTINE_SIZE_BYTES <= BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES, "TRACE handler too big for the BIOS patch area");
 static_assert(sizeof(gwTraceRoutine) == TRACE_ROUTINE_SIZE_BYTES, "Inconsistent TraceRoutine.h");
@@ -34,6 +37,127 @@ static_assert(sizeof(gwTraceRoutine) == TRACE_ROUTINE_SIZE_BYTES, "Inconsistent 
 #define DEBUG_V1_FRAME_WORDS 59
 
 #define MESSAGE_UNRECOGNIZED_FRAME "Unrecognized frame received - TRACE handler from another version?"
+
+/// @brief Classic view: number of lines (16 bytes each) dumped by 'm'
+#define MEMORY_CLASSIC_LINES 8
+#define MEMORY_BYTES_PER_LINE 16
+#define MEMORY_ADDRESS_SPACE 0x1000000u     // 68000: 24 bits address bus
+
+/// @brief Memory zone displayed by the debugger (shared by both views). The dump is read at each stop (full screen
+/// view, panel visible) or on demand (classic view). It is aligned on 16 bytes.
+struct MemoryState
+{
+    MemoryDump dump;
+    bool hasAddress = false;
+    uint32_t address = 0;
+    bool words = true;      // 16-bit words (default) or bytes, kept across stops and views
+};
+
+/// @brief Align the address on a line, keep the zone inside the 24 bits address space
+static void NormalizeMemoryAddress(MemoryState &mem, int lines)
+{
+    uint32_t bytes = (uint32_t)lines * MEMORY_BYTES_PER_LINE;
+    uint32_t address = mem.address & (MEMORY_ADDRESS_SPACE - 1) & ~(uint32_t)(MEMORY_BYTES_PER_LINE - 1);
+    if (bytes > 0 && address > MEMORY_ADDRESS_SPACE - bytes)
+    {
+        address = MEMORY_ADDRESS_SPACE - bytes;
+    }
+    mem.address = address;
+}
+
+/// @brief Read the displayed zone with one READ_MEM request. The $300000-$3FFFFF zone (I/O, side effects) and the
+/// BricoExt ports are never forced: DebugLink refuses them and we only report it.
+/// @param bShift true at a stop (the previous dump becomes the reference of the highlighting), false to replace
+/// the current dump only (refresh at the same stop: the reference stays the dump of the previous stop)
+/// @param error Receives a message on failure (the dump is then cleared, the debugger stays usable)
+static bool ReadMemoryZone(DebugLink &link, MemoryState &mem, int lines, bool bShift, char *error, size_t errorSize)
+{
+    error[0] = 0;
+    if (lines > MEMORY_DUMP_MAX_BYTES / MEMORY_BYTES_PER_LINE)
+    {
+        lines = MEMORY_DUMP_MAX_BYTES / MEMORY_BYTES_PER_LINE;
+    }
+    if (lines <= 0 || !mem.hasAddress)
+    {
+        return true;
+    }
+    NormalizeMemoryAddress(mem, lines);
+    uint16_t wordCount = (uint16_t)(lines * MEMORY_BYTES_PER_LINE / 2);
+    uint16_t words[MEMORY_DUMP_MAX_BYTES / 2];
+    if (!link.ReadMemory(mem.address, wordCount, words, false))
+    {
+        mem.dump.Clear();
+        uint32_t last = mem.address + (uint32_t)wordCount * 2 - 1;
+        if (link.GetLastError() == DebugLinkError::InvalidArgument)
+        {
+            snprintf(error, errorSize, "$%06lx-$%06lx: read refused (I/O zone $300000-$3FFFFF or BricoExt ports $C1FF00-03), scroll away",
+                (unsigned long)mem.address, (unsigned long)last);
+        }
+        else
+        {
+            snprintf(error, errorSize, "$%06lx-$%06lx: memory read failed: %s", (unsigned long)mem.address, (unsigned long)last,
+                DebugLink::GetErrorText(link.GetLastError()));
+        }
+        return false;
+    }
+    uint8_t bytes[MEMORY_DUMP_MAX_BYTES];
+    for (int i = 0; i < wordCount; ++i)
+    {
+        bytes[i * 2] = (uint8_t)(words[i] >> 8);
+        bytes[i * 2 + 1] = (uint8_t)(words[i] & 0xff);
+    }
+    if (bShift)
+    {
+        mem.dump.Push(mem.address, bytes, wordCount * 2);
+    }
+    else
+    {
+        mem.dump.SetCurrent(mem.address, bytes, wordCount * 2);
+    }
+    return true;
+}
+
+/// @brief Classic view: print the dump (hexadecimal + ASCII)
+static void PrintMemoryClassic(const MemoryState &mem, int lines)
+{
+    for (int line = 0; line < lines; ++line)
+    {
+        uint32_t lineAddress = mem.address + (uint32_t)line * MEMORY_BYTES_PER_LINE;
+        printf("%06lx: ", (unsigned long)(lineAddress & 0xffffff));
+        char ascii[MEMORY_BYTES_PER_LINE + 1];
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            uint8_t value = 0;
+            bool known = mem.dump.GetByte(lineAddress + i, &value);
+            if (known)
+            {
+                printf("%02x", value);
+            }
+            else
+            {
+                printf("--");
+            }
+            if (!mem.words || (i & 1))
+            {
+                printf(" ");
+            }
+            ascii[i] = (known && value >= 0x20 && value < 0x7f) ? (char)value : '.';
+            if (i == 7)
+            {
+                printf(" ");
+            }
+        }
+        ascii[MEMORY_BYTES_PER_LINE] = 0;
+        printf(" %s\n", ascii);
+    }
+}
+
+/// @brief Background tasks while the user types in a prompt (the message line holds the prompt: no async messages)
+static void IdleWhilePrompting()
+{
+    MassStorageManager::Loop();
+    ROMUploadManager::Loop();
+}
 
 /// @brief State shared with the poll callback called by DebugLink::WaitStop
 struct CommandDebug::WaitContext
@@ -133,7 +257,10 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
 
     printf("Waiting for debug frame from remote. Press 'x' to exit at any time, 't' to switch to the %s view...\n", bTuiMode ? "classic" : "full screen");
 
+    MemoryState memory;
     DebugTuiView view;
+    view.SetMemoryWordMode(memory.words);
+    view.ShowMemory(&memory.dump, false, 0, nullptr);
     if (bTuiMode)
     {
         view.Enter();
@@ -147,6 +274,144 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     uint32_t nStepCount = 0;
     uint16_t nFrameNumber = 0;  // Stop counter (+1 per stop)
     WaitContext waitContext = { this, &view, &link, nullptr, 0 };
+
+    auto showMessage = [&](const char *text, bool isError)
+    {
+        if (Tui::IsActive())
+        {
+            view.SetMessage(text, isError);
+        }
+        else
+        {
+            printf("%s\n", text);
+        }
+    };
+
+    // Read the displayed memory zone and update the full screen panel (the classic view only dumps on demand).
+    // A failure is shown in the panel and in the message line, it never stops the debugger.
+    auto refreshMemory = [&](bool bShift)
+    {
+        if (!Tui::IsActive())
+        {
+            memory.dump.Clear();    // Not tracked in the classic view: no stale reference for a later highlighting
+            return;
+        }
+        char error[160];
+        error[0] = 0;
+        view.SetMemoryEnabled(memory.hasAddress);   // Layout first: it gives the number of lines
+        int lines = view.GetMemoryLines();
+        if (lines <= 0)
+        {
+            memory.dump.Clear();    // Panel hidden: not read, so the next dump must not be compared with an old one
+        }
+        else
+        {
+            ReadMemoryZone(link, memory, lines, bShift, error, sizeof(error));
+        }
+        view.ShowMemory(&memory.dump, memory.hasAddress, memory.address, error[0] != 0 ? error : nullptr);
+        if (error[0] != 0)
+        {
+            view.SetMessage(error, true);
+        }
+    };
+
+    // 'm' (prompt for an address) and the scroll keys, while the 68k is stopped. Same behaviour in both views,
+    // the classic one prints a MEMORY_CLASSIC_LINES lines dump.
+    auto handleMemoryAction = [&](Action action, const DebugFrame *pShown)
+    {
+        char text[80];
+        if (action == Action::Memory)
+        {
+            bool validated;
+            if (Tui::IsActive())
+            {
+                validated = view.PromptInput("Memory address (hex, $hex, a0-a7, pc, a6-$10): ", text, sizeof(text), IdleWhilePrompting);
+            }
+            else
+            {
+                printf("Memory address: hex, $hex, 0xhex, d0-d7, a0-a7, sp, pc, optional +/-hex ('a0' = register, '$a0' = address).\n"
+                       "Enter alone = monitor off, Esc = cancel.\naddress> ");
+                Tui::Flush();
+                validated = Tui::ReadLine(0, 0, 0, text, sizeof(text), IdleWhilePrompting);
+            }
+            if (!validated)
+            {
+                return;
+            }
+            if (text[0] != 0)
+            {
+                uint32_t value;
+                if (!DebugExpression::Parse(text, pShown, &value))
+                {
+                    char error[120];
+                    snprintf(error, sizeof(error), "Invalid address expression: '%.60s'", text);
+                    showMessage(error, true);
+                    return;
+                }
+                memory.address = value;
+                memory.hasAddress = true;
+            }
+            else
+            {
+                // Empty input: disable the monitor (no more reads, panel hidden)
+                memory.hasAddress = false;
+                memory.dump.Clear();
+                if (Tui::IsActive())
+                {
+                    view.ShowMemory(&memory.dump, false, 0, nullptr);
+                }
+                showMessage("Memory monitor disabled (press 'm' to enable it)", false);
+                return;
+            }
+            if (Tui::IsActive())
+            {
+                view.SetMemoryEnabled(true);
+                if (!view.IsMemoryPanelVisible())
+                {
+                    view.ToggleMemoryPanel();   // Small terminal: show the memory instead of the code
+                }
+            }
+        }
+        else
+        {
+            if (!memory.hasAddress)
+            {
+                showMessage("No memory address yet: press 'm' to enter one", false);
+                return;
+            }
+            if (Tui::IsActive() && !view.IsMemoryPanelVisible())
+            {
+                view.ToggleMemoryPanel();
+            }
+            int lines = Tui::IsActive() ? view.GetMemoryLines() : MEMORY_CLASSIC_LINES;
+            uint32_t delta = (action == Action::PageUp || action == Action::PageDown) ? (uint32_t)lines * MEMORY_BYTES_PER_LINE : MEMORY_BYTES_PER_LINE;
+            if (action == Action::PageUp || action == Action::LineUp)
+            {
+                memory.address = memory.address >= delta ? memory.address - delta : 0;
+            }
+            else
+            {
+                memory.address += delta;    // Clamped by NormalizeMemoryAddress
+            }
+        }
+
+        if (Tui::IsActive())
+        {
+            refreshMemory(false);
+        }
+        else
+        {
+            char error[160];
+            if (ReadMemoryZone(link, memory, MEMORY_CLASSIC_LINES, false, error, sizeof(error)))
+            {
+                PrintMemoryClassic(memory, MEMORY_CLASSIC_LINES);
+            }
+            else
+            {
+                printf("%s\n", error);
+            }
+        }
+    };
 
     while (true)
     {
@@ -201,6 +466,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         {
             ShowFrameClassic(pFrame);
         }
+        refreshMemory(true);
 
         // Wait for a user command
         bool bWaiting = true;
@@ -208,7 +474,8 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         while (bWaiting)
         {
             ServiceBackgroundTasks(view);
-            switch (ReadAction())
+            Action action = ReadAction();
+            switch (action)
             {
             case Action::Step:
                 if (!Tui::IsActive())
@@ -239,12 +506,48 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 return true;
             case Action::ToggleView:
                 ToggleView(view, pFrame, true);
+                refreshMemory(false);
                 break;
             case Action::Redraw:
                 view.Redraw();
+                refreshMemory(false);   // The number of lines may have changed
                 break;
             case Action::Resize:
                 view.Redraw(false);
+                refreshMemory(false);
+                break;
+            case Action::ToggleWords:
+                if (!memory.hasAddress)
+                {
+                    showMessage("No memory address yet: press 'm' to enter one", false);
+                    break;
+                }
+                memory.words = !memory.words;
+                if (Tui::IsActive())
+                {
+                    view.SetMemoryWordMode(memory.words);
+                }
+                else
+                {
+                    PrintMemoryClassic(memory, MEMORY_CLASSIC_LINES);   // Re-display the current dump
+                }
+                break;
+            case Action::ToggleCode:
+                if (!memory.hasAddress)
+                {
+                    showMessage("No memory address yet: press 'm' to enter one", false);
+                }
+                else if (Tui::IsActive() && view.ToggleMemoryPanel())
+                {
+                    refreshMemory(false);
+                }
+                break;
+            case Action::Memory:
+            case Action::PageUp:
+            case Action::PageDown:
+            case Action::LineUp:
+            case Action::LineDown:
+                handleMemoryAction(action, pFrame);
                 break;
             default:
                 break;
@@ -348,6 +651,16 @@ CommandDebug::Action CommandDebug::ReadAction()
         return Action::Continue;
     case Tui::Key::F2:
         return Action::ToggleView;
+    case Tui::Key::F3:
+        return Action::ToggleCode;
+    case Tui::Key::PageUp:
+        return Action::PageUp;
+    case Tui::Key::PageDown:
+        return Action::PageDown;
+    case Tui::Key::Up:
+        return Action::LineUp;
+    case Tui::Key::Down:
+        return Action::LineDown;
     case Tui::Key::Escape:
         return Action::Exit;
     case Tui::Key::Resize:
@@ -365,6 +678,10 @@ CommandDebug::Action CommandDebug::ReadAction()
             return Action::ToggleView;
         case 'r': case 'R':
             return Action::Redraw;
+        case 'm': case 'M':
+            return Action::Memory;
+        case 'w': case 'W':
+            return Action::ToggleWords;
         default:
             return Action::None;
         }
@@ -480,7 +797,7 @@ void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
     }
 
     ShowSplitter();
-    printf("\n's' or space to step, 'c' to continue, 't' for the full screen view, 'x' to exit\n");
+    printf("\n's' or space to step, 'c' to continue, 'm' for a memory dump (PgUp/PgDn to scroll, 'w' for 8/16-bit), 't' for the full screen view, 'x' to exit\n");
 }
 
 void CommandDebug::ShowSplitter()

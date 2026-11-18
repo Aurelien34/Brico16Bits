@@ -13,6 +13,9 @@
 #define ROW_CODE            (ROW_BOXES + HEIGHT_BOXES)
 #define CODE_TEXT_MIN_WIDTH 36
 #define CODE_MAX_LINES      DEBUG_FRAME_CODE_WORDS     // At most one instruction per code word
+#define MEMORY_MAX_LINES    (MEMORY_DUMP_MAX_BYTES / 16)
+#define MEMORY_BYTES_PER_LINE 16
+#define BOTH_PANELS_MIN_ROWS 32                         // From this height, code and memory are displayed together
 
 // Colors (xterm 256 colors palette)
 #define COLOR_BAR_FG        231
@@ -28,6 +31,7 @@
 #define COLOR_CODE_ADDRESS  110
 #define COLOR_CODE_TEXT     252
 #define COLOR_CODE_HEX      244
+#define COLOR_MEMORY_ASCII  250
 #define COLOR_CURRENT_BG    237
 #define COLOR_CURRENT_ARROW 46
 #define COLOR_MESSAGE       214
@@ -77,14 +81,100 @@ void DebugTuiView::ComputeLayout()
     mnWidthStatus = mnScreenWidth - mnWidthRegisters;
     mnColAddressRegisters = mnWidthRegisters / 2 + 2;
 
-    // Message and help lines at the bottom, program box in between
+    // Message and help lines at the bottom, program and/or memory boxes in between.
+    // Below BOTH_PANELS_MIN_ROWS lines, only one of them is displayed (F3 switches); otherwise they share the height.
     mnRowHelp = mnScreenHeight;
     mnRowMessage = mnScreenHeight - 1;
-    mnHeightCode = mnRowMessage - ROW_CODE;
-    mnCodeLines = mnHeightCode - 2;
+    int available = (int)mnRowMessage - ROW_CODE;
+    if (available < 0)
+    {
+        available = 0;
+    }
+    mbBothPanels = mnScreenHeight >= BOTH_PANELS_MIN_ROWS;
+    // The memory panel only exists while the monitor is enabled (an address has been chosen)
+    mbShowMemory = mbHasMemoryAddress && (mbBothPanels || mbMemorySelected);
+    mbShowCode = !mbShowMemory || mbBothPanels;
+    int heightMemory = 0;
+    int heightCode = 0;
+    if (mbShowMemory && mbShowCode)
+    {
+        heightMemory = available / 2;
+        heightCode = available - heightMemory;
+    }
+    else if (mbShowMemory)
+    {
+        heightMemory = available;
+    }
+    else
+    {
+        heightCode = available;
+    }
+    mnRowCode = ROW_CODE;
+    mnHeightCode = heightCode;
+    mnRowMemory = ROW_CODE + heightCode;
+    mnHeightMemory = heightMemory;
+    mnCodeLines = heightCode >= 2 ? heightCode - 2 : 0;
     if (mnCodeLines > CODE_MAX_LINES)
     {
         mnCodeLines = CODE_MAX_LINES;
+    }
+    mnMemoryLines = heightMemory >= 2 ? heightMemory - 2 : 0;
+    if (mnMemoryLines > MEMORY_MAX_LINES)
+    {
+        mnMemoryLines = MEMORY_MAX_LINES;
+    }
+}
+
+bool DebugTuiView::ToggleMemoryPanel()
+{
+    ComputeLayout();
+    if (mbBothPanels || !mbHasMemoryAddress)
+    {
+        return false;
+    }
+    mbMemorySelected = !mbMemorySelected;
+    Redraw(false);
+    return true;
+}
+
+/// @brief Update the memory panel (see header)
+/// @brief Enable / disable the memory monitor. Enabling shows the memory panel (instead of the code on a small
+/// terminal), disabling gives the whole height back to the code panel. Redraws the screen if the state changes.
+void DebugTuiView::SetMemoryEnabled(bool enabled)
+{
+    if (enabled == mbHasMemoryAddress)
+    {
+        return;
+    }
+    mbHasMemoryAddress = enabled;
+    mbMemorySelected = enabled;
+    if (Tui::IsActive())
+    {
+        Redraw(false);
+    }
+}
+
+void DebugTuiView::SetMemoryWordMode(bool words)
+{
+    mbMemoryWords = words;
+    if (Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawMemory();
+        Tui::Flush();
+    }
+}
+
+void DebugTuiView::ShowMemory(const MemoryDump *dump, bool hasAddress, uint32_t address, const char *error)
+{
+    SetMemoryEnabled(hasAddress);
+    mpMemory = dump;
+    mnMemoryAddress = address;
+    strncpy(mszMemoryError, error != nullptr ? error : "", sizeof(mszMemoryError) - 1);
+    mszMemoryError[sizeof(mszMemoryError) - 1] = 0;
+    if (Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawMemory();
+        Tui::Flush();
     }
 }
 
@@ -102,6 +192,7 @@ void DebugTuiView::DrawAll()
         DrawRegisters();
         DrawStatus();
         DrawCode();
+        DrawMemory();
         DrawMessage();
         DrawHelp();
     }
@@ -149,6 +240,31 @@ void DebugTuiView::SetMessage(const char *message, bool isError)
     }
 }
 
+/// @brief Prompt in the message line and read a line. The message line is cleared afterwards.
+/// @return true if validated with Enter, false if cancelled with Escape
+bool DebugTuiView::PromptInput(const char *prompt, char *buffer, size_t size, void (*idle)())
+{
+    Tui::ResetAttributes();
+    Tui::FillLine(mnRowMessage, 1, mnScreenWidth);
+    Tui::SetForeground(COLOR_MESSAGE);
+    Tui::PrintAt(mnRowMessage, 2, "%.*s", mnScreenWidth - 4, prompt);
+    int column = 2 + (int)strlen(prompt);
+    int width = (int)mnScreenWidth - column;
+    if (width < 4)
+    {
+        column = 2;
+        width = (int)mnScreenWidth - 2;
+    }
+    Tui::SetForeground(COLOR_VALUE);
+    bool validated = Tui::ReadLine(mnRowMessage, column, width, buffer, size, idle);
+    Tui::ResetAttributes();
+    mszMessage[0] = 0;
+    mbMessageIsError = false;
+    DrawMessage();
+    Tui::Flush();
+    return validated;
+}
+
 /// @brief Display background messages (ROM received...) in the message line instead of letting them break the screen
 void DebugTuiView::PollAsyncMessages()
 {
@@ -178,7 +294,14 @@ void DebugTuiView::DrawStatic()
     Tui::SetForeground(COLOR_BORDER);
     Tui::Box(ROW_BOXES, COL_REGISTERS, HEIGHT_BOXES, mnWidthRegisters, "Registers");
     Tui::Box(ROW_BOXES, mnColStatus, HEIGHT_BOXES, mnWidthStatus, "Status");
-    Tui::Box(ROW_CODE, 1, mnHeightCode, mnScreenWidth, "Program");
+    if (mbShowCode)
+    {
+        Tui::Box(mnRowCode, 1, mnHeightCode, mnScreenWidth, "Program");
+    }
+    if (mbShowMemory)
+    {
+        Tui::Box(mnRowMemory, 1, mnHeightMemory, mnScreenWidth, "Memory");
+    }
 
     // Fixed labels
     Tui::SetForeground(COLOR_LABEL);
@@ -322,6 +445,10 @@ void DebugTuiView::DrawStatus()
 
 void DebugTuiView::DrawCode()
 {
+    if (!mbShowCode)
+    {
+        return;
+    }
     const int innerWidth = mnScreenWidth - 2;
     // Margin, arrow and address on the left, up to DEBUG_INSTRUCTION_MAX_WORDS hex words on the right:
     // the instruction text takes the rest
@@ -341,7 +468,7 @@ void DebugTuiView::DrawCode()
 
     for (int line = 0; line < mnCodeLines; ++line)
     {
-        uint16_t row = ROW_CODE + 1 + line;
+        uint16_t row = mnRowCode + 1 + line;
         bool current = line == 0;
 
         Tui::ResetAttributes();
@@ -377,6 +504,80 @@ void DebugTuiView::DrawCode()
     Tui::ResetAttributes();
 }
 
+/// @brief Hexadecimal + ASCII dump, 16 bytes per line. Bytes changed since the previous dump are highlighted
+/// in both columns; bytes not covered by the current dump are shown as "--".
+void DebugTuiView::DrawMemory()
+{
+    if (!mbShowMemory)
+    {
+        return;
+    }
+    const int innerWidth = mnScreenWidth - 2;
+    for (int line = 0; line < mnMemoryLines; ++line)
+    {
+        uint16_t row = mnRowMemory + 1 + line;
+        Tui::ResetAttributes();
+        Tui::FillLine(row, 2, innerWidth);
+
+        if (!mbHasMemoryAddress || mszMemoryError[0] != 0)
+        {
+            if (line == 0)
+            {
+                Tui::MoveTo(row, 3);
+                bool error = mszMemoryError[0] != 0;
+                Tui::SetForeground(error ? COLOR_ERROR : COLOR_VALUE_UNKNOWN);
+                Tui::Print("%.*s", innerWidth - 2, error ? mszMemoryError : "No address: press 'm' to enter one");
+            }
+            continue;
+        }
+
+        uint32_t lineAddress = mnMemoryAddress + (uint32_t)line * MEMORY_BYTES_PER_LINE;
+        Tui::MoveTo(row, 3);
+        Tui::SetForeground(COLOR_CODE_ADDRESS);
+        Tui::Print("%06lx  ", (unsigned long)(lineAddress & 0xffffff));
+
+        uint8_t values[MEMORY_BYTES_PER_LINE];
+        uint8_t known[MEMORY_BYTES_PER_LINE];
+        uint8_t changed[MEMORY_BYTES_PER_LINE];
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            uint32_t address = lineAddress + i;
+            known[i] = mpMemory != nullptr && mpMemory->GetByte(address, &values[i]);
+            changed[i] = known[i] && mpMemory->IsByteChanged(address);
+        }
+
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            Tui::SetForeground(!known[i] ? COLOR_VALUE_UNKNOWN : (changed[i] ? COLOR_VALUE_CHANGED : COLOR_VALUE));
+            Tui::SetBold(changed[i]);
+            if (known[i])
+            {
+                Tui::Print("%02x", values[i]);
+            }
+            else
+            {
+                Tui::Print("--");
+            }
+            Tui::SetBold(false);
+            // 8-bit mode: a space after each byte; 16-bit mode: after each word (each byte keeps its own highlighting)
+            if (!mbMemoryWords || (i & 1))
+            {
+                Tui::Print(i == 7 ? "  " : " ");
+            }
+        }
+
+        Tui::Print(" ");
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            Tui::SetForeground(!known[i] ? COLOR_VALUE_UNKNOWN : (changed[i] ? COLOR_VALUE_CHANGED : COLOR_MEMORY_ASCII));
+            Tui::SetBold(changed[i]);
+            Tui::Print("%c", (known[i] && values[i] >= 0x20 && values[i] < 0x7f) ? (char)values[i] : '.');
+            Tui::SetBold(false);
+        }
+    }
+    Tui::ResetAttributes();
+}
+
 void DebugTuiView::DrawMessage()
 {
     Tui::ResetAttributes();
@@ -390,11 +591,14 @@ void DebugTuiView::DrawHelp()
 {
     static const char *keys[][2] =
     {
-        { "s/Space", "Step" },
-        { "c/F5", "Continue" },
-        { "t/F2", "Classic view" },
-        { "r", "Redraw" },
-        { "x/Esc", "Exit" },
+        { "s", "Step" },
+        { "c", "Cont" },
+        { "m", "Mem" },
+        { "w", "8/16" },
+        { "PgUp/Dn", "Scroll" },
+        { "F3", "Code/Mem" },
+        { "t", "View" },
+        { "x", "Exit" },
     };
     Tui::SetColors(COLOR_BAR_FG, COLOR_BAR_BG);
     // Last line of the screen: writing its last cell may scroll some terminals. Fill that cell with "erase to end
@@ -404,12 +608,17 @@ void DebugTuiView::DrawHelp()
     Tui::MoveTo(mnRowHelp, 2);
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
     {
+        bool memoryKey = strcmp(keys[i][0], "w") == 0 || strcmp(keys[i][0], "PgUp/Dn") == 0;
+        if ((memoryKey && !mbHasMemoryAddress) || (strcmp(keys[i][0], "F3") == 0 && (mbBothPanels || !mbHasMemoryAddress)))
+        {
+            continue;   // Monitor disabled, or both panels displayed (nothing to toggle)
+        }
         Tui::SetForeground(COLOR_BAR_KEY);
         Tui::SetBold(true);
         Tui::Print("%s", keys[i][0]);
         Tui::SetBold(false);
         Tui::SetForeground(COLOR_BAR_FG);
-        Tui::Print(" %s   ", keys[i][1]);
+        Tui::Print(" %s  ", keys[i][1]);
     }
     Tui::ResetAttributes();
 }

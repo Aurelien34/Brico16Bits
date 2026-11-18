@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 /// @brief Minimal full-screen text UI layer on top of the ANSI/VT100 serial console.
 ///
@@ -64,6 +65,15 @@ public:
     // Keyboard: non blocking, decodes ANSI escape sequences (arrows, function keys...).
     // While the TUI is active, it also polls the terminal size and returns Key::Resize when it changes.
     static bool ReadKey(KeyEvent *event);
+
+    /// @brief Blocking line editor (printable characters, Backspace, Enter, Escape). Works in the TUI (the field is
+    /// redrawn at row/col with the current attributes) and in the classic console (echo, row/col ignored).
+    /// Other keys (arrows, F-keys, Resize...) are ignored.
+    /// @param width Width of the field in the TUI, the text is limited to width-1 characters (and size-1)
+    /// @param buffer Receives the NUL-terminated text (emptied if Escape)
+    /// @param idle Called regularly while waiting for a key (background tasks), may be nullptr
+    /// @return true if validated with Enter, false if cancelled with Escape
+    static bool ReadLine(uint16_t row, uint16_t col, uint16_t width, char *buffer, size_t size, void (*idle)() = nullptr);
 
 private:
     static Key DecodeEscapeSequence();
