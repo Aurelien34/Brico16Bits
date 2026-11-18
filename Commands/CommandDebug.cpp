@@ -284,7 +284,7 @@ static bool PollExitWaiting(void *context)
 /// @param frame Current stop
 /// @param pNext Receives PC + instruction size (24 bits)
 /// @return false if a plain STEP must be used: other instruction, undecoded ("Unknown") or truncated, so that its size
-/// is not reliable. TRAPV is the only exception: not decoded by OpcodeDecoder, but known to be one word.
+/// is not reliable.
 static bool GetStepOverTarget(const DebugFrame *frame, uint32_t *pNext)
 {
     static DisassembledInstruction instruction;     // Static: too large for the stack
@@ -300,11 +300,7 @@ static bool GetStepOverTarget(const DebugFrame *frame, uint32_t *pNext)
     uint32_t size = (uint32_t)instruction.wordCount * 2;
     if (strcmp(instruction.text, "Unknown") == 0)
     {
-        if (instruction.words[0] != 0x4e76)     // TRAPV
-        {
-            return false;
-        }
-        size = 2;
+        return false;
     }
     *pNext = (frame->pc + size) & 0xffffff;
     return true;

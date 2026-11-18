@@ -559,10 +559,10 @@ code transmis sont corrects.
   `move ...,sr/ccr` refuse le mode An. Bug trouvé au passage : le masque de `Nop` valait
   `0b0100111001110001` au lieu de `$FFFF`, si bien que des opcodes comme `6E71` (`bgt`) étaient
   affichés `nop` ; corrigé. Tests hôte : `HostTests/TestOpcodeDecoder.cpp`.
-- Restent ouverts :
-  - styles différents : variantes SR `ori #$8000,sr`, variantes CCR existantes `ori #10,CCR`
-    (sans `$`, CCR en majuscules) ;
-  - `OpcodeDecoder.cpp` (`Opcode_Tool_BitChange`) : bug de précédence
-    `(x>>9) & 0b111 != 0b100` (signalé par `-Wparentheses`, comme une autre ligne vers 202) ;
-  - le cas particulier `TRAPV` de `CommandDebug.cpp` (taille fiable malgré `Unknown`) est
-    devenu inutile, sans être faux.
+- **Corrigés ensuite** (demande de l'utilisateur) :
+  - styles harmonisés : CCR désormais `ori #$10,ccr` comme les variantes SR (avant : variantes SR `ori #$8000,sr`, variantes CCR existantes `ori #10,CCR`
+    sans `$`, CCR en majuscules) ;
+  - `Opcode_Tool_BitChange` : bug de précédence corrigé (`((x>>9) & 0b111) != 0b100`), parenthèses
+    ajoutées vers la ligne 202 ; plus aucun warning `-Wparentheses` ;
+  - le cas particulier `TRAPV` de `CommandDebug.cpp` est supprimé ;
+  - en plus : `ori`/`andi`/`eori`/`addi`/`subi`/`cmpi` refusent une destination An, PC-relative ou immédiate (68000), ce qui évite `ori.b #$100,#...` pour un CCR invalide.

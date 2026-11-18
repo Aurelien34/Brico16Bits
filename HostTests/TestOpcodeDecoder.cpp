@@ -46,10 +46,24 @@ int main()
     Check({0x007C, 0x8000}, "ori #$8000,sr", 2);
     Check({0x027C, 0x7FFF}, "andi #$7fff,sr", 2);
     Check({0x0A7C, 0xA000}, "eori #$a000,sr", 2);
-    // Logic immediate to CCR (unchanged)
-    Check({0x003C, 0x0010}, "ori #10,CCR", 2);
-    Check({0x023C, 0x00EF}, "andi #ef,CCR", 2);
-    Check({0x0A3C, 0x0001}, "eori #1,CCR", 2);
+    // Logic immediate to CCR (same style as the SR variants)
+    Check({0x003C, 0x0010}, "ori #$10,ccr", 2);
+    Check({0x023C, 0x00EF}, "andi #$ef,ccr", 2);
+    Check({0x0A3C, 0x0001}, "eori #$1,ccr", 2);
+    Check({0x003C, 0x0100}, "Unknown", 1);  // CCR immediate above $FF is invalid
+
+    // Static bit operations: bits 11-9 must be 100 (precedence bug fixed)
+    Check({0x0800, 0x0003}, "btst #3,d0", 2);
+    Check({0x0880, 0x0003}, "bclr #3,d0", 2);
+    Check({0x08C0, 0x0003}, "bset #3,d0", 2);
+    Check({0x0840, 0x0003}, "bchg #3,d0", 2);
+    // Dynamic bit operations (unchanged)
+    Check({0x0300}, "btst d1,d0", 1);
+    // Other immediates that share the 0000 xxx0 pattern must not become bit operations
+    Check({0x0400, 0x0012}, "subi.b #$12,d0", 2);
+    Check({0x0600, 0x0012}, "addi.b #$12,d0", 2);
+    Check({0x0C00, 0x0012}, "cmpi.b #$12,d0", 2);
+    Check({0x0A00, 0x0012}, "eori.b #$12,d0", 2);
 
     // MOVE USP
     Check({0x4E60}, "move a0,usp", 1);

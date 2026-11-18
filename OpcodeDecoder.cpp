@@ -199,7 +199,7 @@ void OpcodeDecoder::AppendRegisterList(uint16_t bitmask, bool reverse)
     bool bFirstReg = true;
     for (int nRegtype = 0; nRegtype < 2; ++nRegtype)
     {
-        RegisterType eRegType = (nRegtype == 0 && !reverse || nRegtype == 1 && reverse) ? RegisterType::Data : RegisterType::Address;
+        RegisterType eRegType = ((nRegtype == 0 && !reverse) || (nRegtype == 1 && reverse)) ? RegisterType::Data : RegisterType::Address;
         for (int nRegIndex = 0; nRegIndex < 8 ; ++nRegIndex)
         {
             int bitmaskIndex = reverse ? 7 - nRegIndex : nRegIndex;
@@ -253,6 +253,12 @@ bool OpcodeDecoder::Opcode_Tool_Immediate_Address(const char *opcode)
     uint16_t sizeCode = ((mnCurrentOpcode >> 6) & 0b11);
     if (sizeCode == 0b11)
         return false;
+    // 68000: the destination must be data alterable (no An, no PC relative, no immediate). This also keeps
+    // ORI/ANDI/EORI to CCR with an invalid value from being shown as "ori.b #$100,#..."
+    uint16_t mode = (mnCurrentOpcode >> 3) & 0b111;
+    uint16_t reg = mnCurrentOpcode & 0b111;
+    if (mode == 0b001 || (mode == 0b111 && reg >= 0b010))
+        return false;
     mnDataByteSize = (1 << sizeCode);
     Append(opcode);
     AppendDataSizeMnemonic();
@@ -290,7 +296,7 @@ bool OpcodeDecoder::Opcode_Tool_BitChange(const char *opcode)
     else
     {
         // Static mode
-        if ((mnCurrentOpcode >> 9) & 0b111 != 0b100)
+        if (((mnCurrentOpcode >> 9) & 0b111) != 0b100)    // Static form: bits 11-9 = 100 (was a precedence bug)
             return false;
         uint16_t bitNumber = ReadBinCode();
         if (bitNumber > 0x00ff)
@@ -401,7 +407,7 @@ bool OpcodeDecoder::Opcode_Tool_LogicItoCCR(const char *opcode)
         return false;
     }
     Append(opcode);
-    AppendFormat(" #%x,CCR", value);
+    AppendFormat(" #$%x,ccr", value);   // Same style as the SR variants: "$" hexadecimal, lower case register
     return true;
 }
 
@@ -626,14 +632,7 @@ bool OpcodeDecoder::Opcode_EorI()
 
 bool OpcodeDecoder::Opcode_EorItoCCR()
 {
-    uint16_t value = ReadBinCode();
-    if (value > 0xff)
-    {
-        RollbackBinCode();
-        return false;
-    }
-    AppendFormat("eori #%x,CCR", value);
-    return true;
+    return Opcode_Tool_LogicItoCCR("eori");
 }
 
 bool OpcodeDecoder::Opcode_Exg()
