@@ -199,7 +199,7 @@ void OpcodeDecoder::AppendRegisterList(uint16_t bitmask, bool reverse)
     bool bFirstReg = true;
     for (int nRegtype = 0; nRegtype < 2; ++nRegtype)
     {
-        RegisterType eRegType = (nRegtype == 0 && !reverse || nRegtype == 1 && reverse) ? RegisterType::Data : RegisterType::Address;
+        RegisterType eRegType = ((nRegtype == 0 && !reverse) || (nRegtype == 1 && reverse)) ? RegisterType::Data : RegisterType::Address;
         for (int nRegIndex = 0; nRegIndex < 8 ; ++nRegIndex)
         {
             int bitmaskIndex = reverse ? 7 - nRegIndex : nRegIndex;
@@ -253,6 +253,12 @@ bool OpcodeDecoder::Opcode_Tool_Immediate_Address(const char *opcode)
     uint16_t sizeCode = ((mnCurrentOpcode >> 6) & 0b11);
     if (sizeCode == 0b11)
         return false;
+    // 68000: the destination must be data alterable (no An, no PC relative, no immediate). This also keeps
+    // ORI/ANDI/EORI to CCR with an invalid value from being shown as "ori.b #$100,#..."
+    uint16_t mode = (mnCurrentOpcode >> 3) & 0b111;
+    uint16_t reg = mnCurrentOpcode & 0b111;
+    if (mode == 0b001 || (mode == 0b111 && reg >= 0b010))
+        return false;
     mnDataByteSize = (1 << sizeCode);
     Append(opcode);
     AppendDataSizeMnemonic();
@@ -290,7 +296,7 @@ bool OpcodeDecoder::Opcode_Tool_BitChange(const char *opcode)
     else
     {
         // Static mode
-        if ((mnCurrentOpcode >> 9) & 0b111 != 0b100)
+        if (((mnCurrentOpcode >> 9) & 0b111) != 0b100)    // Static form: bits 11-9 = 100 (was a precedence bug)
             return false;
         uint16_t bitNumber = ReadBinCode();
         if (bitNumber > 0x00ff)
@@ -401,7 +407,7 @@ bool OpcodeDecoder::Opcode_Tool_LogicItoCCR(const char *opcode)
         return false;
     }
     Append(opcode);
-    AppendFormat(" #%x,CCR", value);
+    AppendFormat(" #$%x,ccr", value);   // Same style as the SR variants: "$" hexadecimal, lower case register
     return true;
 }
 
@@ -626,14 +632,7 @@ bool OpcodeDecoder::Opcode_EorI()
 
 bool OpcodeDecoder::Opcode_EorItoCCR()
 {
-    uint16_t value = ReadBinCode();
-    if (value > 0xff)
-    {
-        RollbackBinCode();
-        return false;
-    }
-    AppendFormat("eori #%x,CCR", value);
-    return true;
+    return Opcode_Tool_LogicItoCCR("eori");
 }
 
 bool OpcodeDecoder::Opcode_Exg()
@@ -750,13 +749,83 @@ bool OpcodeDecoder::Opcode_MoveA()
     return true;
 }
 
-bool OpcodeDecoder::Opcode_MoveToCCR()
+bool OpcodeDecoder::Opcode_Tool_MoveToStatusRegister(const char *destination)
 {
+    // Source must be a data addressing mode (no An, no invalid mode 7 register)
+    uint16_t eamode = (mnCurrentOpcode >> 3) & 0b111;
+    uint16_t eareg = mnCurrentOpcode & 0b111;
+    if (eamode == 0b001 || (eamode == 0b111 && eareg > 0b100))
+        return false;
     Append("move ");
     mnDataByteSize = 2;
     AppendEffectiveAddress();
-    Append(",ccr");
+    Append(destination);
     return true;
+}
+
+bool OpcodeDecoder::Opcode_MoveToCCR()
+{
+    return Opcode_Tool_MoveToStatusRegister(",ccr");
+}
+
+bool OpcodeDecoder::Opcode_MoveToSR()
+{
+    return Opcode_Tool_MoveToStatusRegister(",sr");
+}
+
+bool OpcodeDecoder::Opcode_MoveUSP()
+{
+    Append("move ");
+    if (mnCurrentOpcode & 0b1000)
+    {
+        // MOVE USP,An
+        Append("usp,");
+        AppendRegisterName(RegisterType::Address, mnCurrentOpcode & 0b111);
+    }
+    else
+    {
+        // MOVE An,USP
+        AppendRegisterName(RegisterType::Address, mnCurrentOpcode & 0b111);
+        Append(",usp");
+    }
+    return true;
+}
+
+bool OpcodeDecoder::Opcode_Stop()
+{
+    Append("stop #");
+    AppendNumericValue(2);
+    return true;
+}
+
+bool OpcodeDecoder::Opcode_Reset()
+{
+    Append("reset");
+    return true;
+}
+
+bool OpcodeDecoder::Opcode_Tool_LogicItoSR(const char *opcode)
+{
+    Append(opcode);
+    Append(" #");
+    AppendNumericValue(2);
+    Append(",sr");
+    return true;
+}
+
+bool OpcodeDecoder::Opcode_OrItoSR()
+{
+    return Opcode_Tool_LogicItoSR("ori");
+}
+
+bool OpcodeDecoder::Opcode_AndItoSR()
+{
+    return Opcode_Tool_LogicItoSR("andi");
+}
+
+bool OpcodeDecoder::Opcode_EorItoSR()
+{
+    return Opcode_Tool_LogicItoSR("eori");
 }
 
 bool OpcodeDecoder::Opcode_MoveFromSR()
@@ -1025,6 +1094,13 @@ const OpcodeDecoder::opcodedesc OpcodeDecoder::maOpcodeTable[] =
     {&OpcodeDecoder::Opcode_Rte,            0b1111111111111111, 0b0100111001110011 },
     {&OpcodeDecoder::Opcode_Rts,            0b1111111111111111, 0b0100111001110101 },
     {&OpcodeDecoder::Opcode_Rtr,            0b1111111111111111, 0b0100111001110111 },
+    {&OpcodeDecoder::Opcode_Stop,           0b1111111111111111, 0b0100111001110010 },
+    {&OpcodeDecoder::Opcode_Reset,          0b1111111111111111, 0b0100111001110000 },
+    {&OpcodeDecoder::Opcode_MoveUSP,        0b1111111111110000, 0b0100111001100000 },
+    {&OpcodeDecoder::Opcode_MoveToSR,       0b1111111111000000, 0b0100011011000000 },
+    {&OpcodeDecoder::Opcode_OrItoSR,        0b1111111111111111, 0b0000000001111100 },
+    {&OpcodeDecoder::Opcode_EorItoSR,       0b1111111111111111, 0b0000101001111100 },
+    {&OpcodeDecoder::Opcode_AndItoSR,       0b1111111111111111, 0b0000001001111100 },
     {&OpcodeDecoder::Opcode_OrItoCCR,       0b1111111111111111, 0b0000000000111100 },
     {&OpcodeDecoder::Opcode_EorItoCCR,      0b1111111111111111, 0b0000101000111100 },
     {&OpcodeDecoder::Opcode_AndItoCCR,      0b1111111111111111, 0b0000001000111100 },
@@ -1083,7 +1159,7 @@ const OpcodeDecoder::opcodedesc OpcodeDecoder::maOpcodeTable[] =
     {&OpcodeDecoder::Opcode_Bclr,           0b1111000011000000, 0b0000000010000000 },
     {&OpcodeDecoder::Opcode_Bset,           0b1111000011000000, 0b0000000011000000 },
     {&OpcodeDecoder::Opcode_Bchg,           0b1111000011000000, 0b0000000001000000 },
-    {&OpcodeDecoder::Opcode_Nop,            0b0100111001110001, 0b0100111001110001 },
+    {&OpcodeDecoder::Opcode_Nop,            0b1111111111111111, 0b0100111001110001 },
     {&OpcodeDecoder::Opcode_Bcc,            0b1111000000000000, 0b0110000000000000 },
     {&OpcodeDecoder::Opcode_Bra,            0b1111111100000000, 0b0110000000000000 },
     {&OpcodeDecoder::Opcode_AndI,           0b1111111100000000, 0b0000001000000000 },

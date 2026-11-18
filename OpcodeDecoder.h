@@ -57,6 +57,8 @@ private:
     bool Opcode_Tool_SignExtension(const char *opcode);
     bool Opcode_Tool_OpeOperandWithSize(const char *opcode);
     bool Opcode_Tool_LogicItoCCR(const char *opcode);
+    bool Opcode_Tool_LogicItoSR(const char *opcode);
+    bool Opcode_Tool_MoveToStatusRegister(const char *destination);
     bool Opcode_Tools_AddASubA(const char *opcode);
     bool Opcode_AddSubQ(const char *opcode);
 
@@ -102,6 +104,13 @@ private:
     bool Opcode_Move();
     bool Opcode_MoveA();
     bool Opcode_MoveToCCR();
+    bool Opcode_MoveToSR();
+    bool Opcode_MoveUSP();
+    bool Opcode_Stop();
+    bool Opcode_Reset();
+    bool Opcode_OrItoSR();
+    bool Opcode_AndItoSR();
+    bool Opcode_EorItoSR();
     bool Opcode_MoveFromSR();
     bool Opcode_MoveM();
     bool Opcode_MoveP();

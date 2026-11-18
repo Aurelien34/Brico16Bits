@@ -13,6 +13,12 @@
 #define ROW_CODE            (ROW_BOXES + HEIGHT_BOXES)
 #define CODE_TEXT_MIN_WIDTH 36
 #define CODE_MAX_LINES      DEBUG_FRAME_CODE_WORDS     // At most one instruction per code word
+#define MEMORY_MAX_LINES    (MEMORY_DUMP_MAX_BYTES / 16)
+#define MEMORY_BYTES_PER_LINE 16
+#define CALLERS_MIN_LINES   3                           // "Callers" panel: 3 to DEBUG_CALLERS_MAX_LINES lines
+#define MAIN_MIN_ROWS       10                          // Program or Memory alone keeps at least this height (80x24 layout)
+#define MAIN_BOTH_MIN_ROWS  12                          // Program + Memory together keep at least this height
+#define BOTH_PANELS_MIN_ROWS 32                        // From this height, code and memory are displayed together
 
 // Colors (xterm 256 colors palette)
 #define COLOR_BAR_FG        231
@@ -28,6 +34,15 @@
 #define COLOR_CODE_ADDRESS  110
 #define COLOR_CODE_TEXT     252
 #define COLOR_CODE_HEX      244
+#define COLOR_MEMORY_ASCII  250
+#define COLOR_MEMORY_PENDING 213    // Value being typed in the memory edit mode
+#define COLOR_MEMORY_WRITTEN 51     // Written by the user at this stop
+#define TARGET_COLUMN       24      // Column of the branch target "($xxxxxx)" in the instruction text field
+#define COLOR_TARGET        179     // Branch target
+#define COLOR_TARGET_HISTORY 95     // Branch target on a history line
+#define COLOR_HISTORY       242     // Executed instructions above the current one (dimmed)
+#define HISTORY_PREFIX_STEP_OUT "<- out of "    // History line of the instruction where a step out started
+#define HISTORY_MIN_LISTING 3       // Lines of the listing (current instruction included) kept when history takes lines
 #define COLOR_CURRENT_BG    237
 #define COLOR_CURRENT_ARROW 46
 #define COLOR_MESSAGE       214
@@ -35,6 +50,97 @@
 #define COLOR_STATE_WAITING 130
 #define COLOR_STATE_STOPPED 124
 #define COLOR_STATE_RUNNING 28
+
+bool ExecutedInstruction::IsSizeReliable() const
+{
+    return !instruction.truncated && instruction.wordCount > 0 && strcmp(instruction.text, "Unknown") != 0;
+}
+
+bool ExecutedInstruction::IsContiguousTo(uint32_t nextPc) const
+{
+    if (stepOutOrigin || !IsSizeReliable())
+    {
+        return false;
+    }
+    return ((instruction.address + GetSizeBytes()) & 0xffffff) == (nextPc & 0xffffff);
+}
+
+void ExecutionHistory::Push(const DisassembledInstruction &instruction, uint32_t sp, bool stepOutOrigin)
+{
+    if (mnCount == MAX_ENTRIES)
+    {
+        for (int i = 1; i < MAX_ENTRIES; ++i)
+        {
+            maEntries[i - 1] = maEntries[i];
+        }
+        --mnCount;
+    }
+    ExecutedInstruction &entry = maEntries[mnCount++];
+    entry.instruction = instruction;
+    entry.sp = sp;
+    entry.stepOutOrigin = stepOutOrigin;
+}
+
+int ExecutionHistory::BuildRows(uint32_t currentPc, HistoryRow *rows) const
+{
+    if (mnCount == 0)
+    {
+        return 0;
+    }
+    const ExecutedInstruction &latest = maEntries[mnCount - 1];
+    if (!latest.IsContiguousTo(currentPc))
+    {
+        // Flow break: only say where we come from, the older entries are not at the addresses above the listing
+        rows[0].pInstruction = &latest;
+        rows[0].isFromLine = true;
+        return 1;
+    }
+    int count = 0;
+    if (mnCount == 2 && maEntries[0].IsContiguousTo(latest.instruction.address))
+    {
+        rows[count].pInstruction = &maEntries[0];
+        rows[count++].isFromLine = false;
+    }
+    rows[count].pInstruction = &latest;
+    rows[count++].isFromLine = false;
+    return count;
+}
+
+/// @brief Print the instruction text then, if it is a relative branch, its absolute target "($xxxxxx)" at a fixed
+/// column of the text field (right after the text if that one is longer), truncated to the field width.
+/// The text field is padded to textWidth. Colors are set here; the caller restores its own afterwards.
+static void PrintTextAndTarget(const DisassembledInstruction *instruction, int textWidth, uint8_t textColor, uint8_t targetColor, bool bold)
+{
+    const char *text = instruction->truncated ? "..." : instruction->text;
+    int length = (int)strlen(text);
+    if (length > textWidth)
+    {
+        length = textWidth;
+    }
+    Tui::SetForeground(textColor);
+    Tui::SetBold(bold);
+    Tui::Print("%.*s", length, text);
+    Tui::SetBold(false);
+    int position = length;
+    if (instruction->hasTarget)
+    {
+        int column = length + 1 > TARGET_COLUMN ? length + 1 : TARGET_COLUMN;
+        int room = textWidth - column;
+        if (room > 0)
+        {
+            char target[12];
+            snprintf(target, sizeof(target), "($%06lx)", (unsigned long)(instruction->target & 0xffffff));
+            Tui::RepeatChar(' ', column - position);
+            Tui::SetForeground(targetColor);
+            Tui::Print("%.*s", room, target);
+            position = column + (room < 9 ? room : 9);
+        }
+    }
+    if (position < textWidth)
+    {
+        Tui::RepeatChar(' ', textWidth - position);
+    }
+}
 
 void DebugTuiView::Enter()
 {
@@ -77,14 +183,169 @@ void DebugTuiView::ComputeLayout()
     mnWidthStatus = mnScreenWidth - mnWidthRegisters;
     mnColAddressRegisters = mnWidthRegisters / 2 + 2;
 
-    // Message and help lines at the bottom, program box in between
+    // Message and help lines at the bottom, program and/or memory boxes in between.
+    // Below BOTH_PANELS_MIN_ROWS lines, only one of them is displayed (F3 switches); otherwise they share the height.
     mnRowHelp = mnScreenHeight;
     mnRowMessage = mnScreenHeight - 1;
-    mnHeightCode = mnRowMessage - ROW_CODE;
-    mnCodeLines = mnHeightCode - 2;
+    int available = (int)mnRowMessage - ROW_CODE;
+    if (available < 0)
+    {
+        available = 0;
+    }
+    mbBothPanels = mnScreenHeight >= BOTH_PANELS_MIN_ROWS;
+
+    // "Callers" panel at the bottom, only if Program / Memory keep their minimum height (so never at 80x24: a one
+    // line "Caller" in the Status box is used instead). It takes 3 to 5 lines, borders excluded.
+    int callerLines = available - ((mbHasMemoryAddress && mbBothPanels) ? MAIN_BOTH_MIN_ROWS : MAIN_MIN_ROWS) - 2;
+    if (callerLines < CALLERS_MIN_LINES)
+    {
+        callerLines = 0;
+    }
+    if (callerLines > DEBUG_CALLERS_MAX_LINES)
+    {
+        callerLines = DEBUG_CALLERS_MAX_LINES;
+    }
+    mnCallerLines = callerLines;
+    mnHeightCallers = callerLines > 0 ? callerLines + 2 : 0;
+    available -= mnHeightCallers;
+    mnRowCallers = mnRowMessage - mnHeightCallers;
+
+    // The memory panel only exists while the monitor is enabled (an address has been chosen)
+    mbShowMemory = mbHasMemoryAddress && (mbBothPanels || mbMemorySelected);
+    mbShowCode = !mbShowMemory || mbBothPanels;
+    int heightMemory = 0;
+    int heightCode = 0;
+    if (mbShowMemory && mbShowCode)
+    {
+        heightMemory = available / 2;
+        heightCode = available - heightMemory;
+    }
+    else if (mbShowMemory)
+    {
+        heightMemory = available;
+    }
+    else
+    {
+        heightCode = available;
+    }
+    mnRowCode = ROW_CODE;
+    mnHeightCode = heightCode;
+    mnRowMemory = ROW_CODE + heightCode;
+    mnHeightMemory = heightMemory;
+    mnCodeLines = heightCode >= 2 ? heightCode - 2 : 0;
     if (mnCodeLines > CODE_MAX_LINES)
     {
         mnCodeLines = CODE_MAX_LINES;
+    }
+    mnMemoryLines = heightMemory >= 2 ? heightMemory - 2 : 0;
+    if (mnMemoryLines > MEMORY_MAX_LINES)
+    {
+        mnMemoryLines = MEMORY_MAX_LINES;
+    }
+}
+
+int DebugTuiView::GetCallerLines() const
+{
+    if (!Tui::IsActive() || !Tui::IsLargeEnough())
+    {
+        return 0;
+    }
+    return mnCallerLines > 0 ? mnCallerLines : 1;
+}
+
+void DebugTuiView::SetCallers(const Caller *callers, int count, CallersStatus status, bool bDraw)
+{
+    if (callers == nullptr || count < 0)
+    {
+        count = 0;
+    }
+    if (count > DEBUG_CALLERS_MAX_LINES)
+    {
+        count = DEBUG_CALLERS_MAX_LINES;
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        maCallers[i] = callers[i];
+    }
+    mnCallerCount = count;
+    meCallersStatus = status;
+    if (bDraw && Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawCallers();
+        DrawCallerStatusLine();
+        Tui::Flush();
+    }
+}
+
+bool DebugTuiView::ToggleMemoryPanel()
+{
+    ComputeLayout();
+    if (mbBothPanels || !mbHasMemoryAddress)
+    {
+        return false;
+    }
+    mbMemorySelected = !mbMemorySelected;
+    Redraw(false);
+    return true;
+}
+
+/// @brief Update the memory panel (see header)
+/// @brief Enable / disable the memory monitor. Enabling shows the memory panel (instead of the code on a small
+/// terminal), disabling gives the whole height back to the code panel. Redraws the screen if the state changes.
+void DebugTuiView::SetMemoryEnabled(bool enabled)
+{
+    if (enabled == mbHasMemoryAddress)
+    {
+        return;
+    }
+    mbHasMemoryAddress = enabled;
+    mbMemorySelected = enabled;
+    if (Tui::IsActive())
+    {
+        Redraw(false);
+    }
+}
+
+void DebugTuiView::SetMemoryWordMode(bool words)
+{
+    mbMemoryWords = words;
+    if (Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawMemory();
+        Tui::Flush();
+    }
+}
+
+void DebugTuiView::RedrawMemory()
+{
+    if (Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawMemory();
+        Tui::Flush();
+    }
+}
+
+void DebugTuiView::SetMemoryEdit(const MemoryCursor *cursor)
+{
+    bool changed = (cursor != nullptr) != (mpEditCursor != nullptr);
+    mpEditCursor = cursor;
+    if (changed && Tui::IsActive())
+    {
+        Redraw(false);      // Title and help bar change
+    }
+}
+
+void DebugTuiView::ShowMemory(const MemoryDump *dump, bool hasAddress, uint32_t address, const char *error)
+{
+    SetMemoryEnabled(hasAddress);
+    mpMemory = dump;
+    mnMemoryAddress = address;
+    strncpy(mszMemoryError, error != nullptr ? error : "", sizeof(mszMemoryError) - 1);
+    mszMemoryError[sizeof(mszMemoryError) - 1] = 0;
+    if (Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawMemory();
+        Tui::Flush();
     }
 }
 
@@ -102,6 +363,8 @@ void DebugTuiView::DrawAll()
         DrawRegisters();
         DrawStatus();
         DrawCode();
+        DrawMemory();
+        DrawCallers();
         DrawMessage();
         DrawHelp();
     }
@@ -115,6 +378,7 @@ void DebugTuiView::ShowFrame(const DebugFrame *frame, const DebugFrame *previous
     mpFrame = frame;
     mpPreviousFrame = previousFrame;
     mnStepCount = stepCount;
+    bool bHelpChanges = meState == State::Running;  // The help bar depends on the Running state (see SetState)
     meState = State::Stopped;
     if (!Tui::IsActive() || !Tui::IsLargeEnough())
     {
@@ -124,15 +388,24 @@ void DebugTuiView::ShowFrame(const DebugFrame *frame, const DebugFrame *previous
     DrawRegisters();
     DrawStatus();
     DrawCode();
+    if (bHelpChanges)
+    {
+        DrawHelp();
+    }
     Tui::Flush();
 }
 
 void DebugTuiView::SetState(State state)
 {
+    bool bHelpChanges = (meState == State::Running) != (state == State::Running);   // The help bar depends on it
     meState = state;
     if (Tui::IsActive() && Tui::IsLargeEnough())
     {
         DrawTitle();
+        if (bHelpChanges)
+        {
+            DrawHelp();
+        }
         Tui::Flush();
     }
 }
@@ -147,6 +420,31 @@ void DebugTuiView::SetMessage(const char *message, bool isError)
         DrawMessage();
         Tui::Flush();
     }
+}
+
+/// @brief Prompt in the message line and read a line. The message line is cleared afterwards.
+/// @return true if validated with Enter, false if cancelled with Escape
+bool DebugTuiView::PromptInput(const char *prompt, char *buffer, size_t size, void (*idle)())
+{
+    Tui::ResetAttributes();
+    Tui::FillLine(mnRowMessage, 1, mnScreenWidth);
+    Tui::SetForeground(COLOR_MESSAGE);
+    Tui::PrintAt(mnRowMessage, 2, "%.*s", mnScreenWidth - 4, prompt);
+    int column = 2 + (int)strlen(prompt);
+    int width = (int)mnScreenWidth - column;
+    if (width < 4)
+    {
+        column = 2;
+        width = (int)mnScreenWidth - 2;
+    }
+    Tui::SetForeground(COLOR_VALUE);
+    bool validated = Tui::ReadLine(mnRowMessage, column, width, buffer, size, idle);
+    Tui::ResetAttributes();
+    mszMessage[0] = 0;
+    mbMessageIsError = false;
+    DrawMessage();
+    Tui::Flush();
+    return validated;
 }
 
 /// @brief Display background messages (ROM received...) in the message line instead of letting them break the screen
@@ -178,7 +476,18 @@ void DebugTuiView::DrawStatic()
     Tui::SetForeground(COLOR_BORDER);
     Tui::Box(ROW_BOXES, COL_REGISTERS, HEIGHT_BOXES, mnWidthRegisters, "Registers");
     Tui::Box(ROW_BOXES, mnColStatus, HEIGHT_BOXES, mnWidthStatus, "Status");
-    Tui::Box(ROW_CODE, 1, mnHeightCode, mnScreenWidth, "Program");
+    if (mbShowCode)
+    {
+        Tui::Box(mnRowCode, 1, mnHeightCode, mnScreenWidth, "Program");
+    }
+    if (mbShowMemory)
+    {
+        Tui::Box(mnRowMemory, 1, mnHeightMemory, mnScreenWidth, mpEditCursor != nullptr ? "Memory [EDIT]" : "Memory");
+    }
+    if (mnCallerLines > 0)
+    {
+        Tui::Box(mnRowCallers, 1, mnHeightCallers, mnScreenWidth, "Callers");
+    }
 
     // Fixed labels
     Tui::SetForeground(COLOR_LABEL);
@@ -201,13 +510,9 @@ void DebugTuiView::DrawTitle()
     Tui::PrintAt(ROW_TITLE, 2, "BricoNeo - 68000 live debugger");
     Tui::SetBold(false);
 
-    if (mpFrame != nullptr)
-    {
-        Tui::PrintAt(ROW_TITLE, mnColStatus, "frame #%-5u  steps %-6lu", mpFrame->frameNumber, (unsigned long)mnStepCount);
-    }
-
     const char *stateText;
     uint8_t stateColor;
+    char runningText[32];
     switch (meState)
     {
     case State::Stopped:
@@ -215,7 +520,15 @@ void DebugTuiView::DrawTitle()
         stateColor = COLOR_STATE_STOPPED;
         break;
     case State::Running:
-        stateText = " RUNNING ";
+        if (mbRunTargetValid)
+        {
+            snprintf(runningText, sizeof(runningText), " RUNNING (until $%06lx) ", (unsigned long)(mnRunTarget & 0xffffff));
+            stateText = runningText;
+        }
+        else
+        {
+            stateText = " RUNNING ";
+        }
         stateColor = COLOR_STATE_RUNNING;
         break;
     default:
@@ -223,9 +536,17 @@ void DebugTuiView::DrawTitle()
         stateColor = COLOR_STATE_WAITING;
         break;
     }
+
+    // The frame counters are not displayed if the (longer) state text would overlap them
+    int stateLength = (int)strlen(stateText);
+    if (mpFrame != nullptr && (int)mnColStatus + 26 < (int)mnScreenWidth - stateLength)
+    {
+        Tui::PrintAt(ROW_TITLE, mnColStatus, "frame #%-5u  steps %-6lu", mpFrame->frameNumber, (unsigned long)mnStepCount);
+    }
+
     Tui::SetColors(COLOR_BAR_FG, stateColor);
     Tui::SetBold(true);
-    Tui::PrintAt(ROW_TITLE, mnScreenWidth - 9, "%s", stateText);
+    Tui::PrintAt(ROW_TITLE, mnScreenWidth - stateLength, "%s", stateText);
     Tui::ResetAttributes();
 }
 
@@ -251,7 +572,7 @@ void DebugTuiView::DrawRegisters()
         Tui::MoveTo(ROW_BOXES + 1 + i, COL_REGISTERS + 7);
         PrintRegisterValue(known, known && mpPreviousFrame != nullptr && mpPreviousFrame->d[i] != mpFrame->d[i], known ? mpFrame->d[i] : 0);
         Tui::MoveTo(ROW_BOXES + 1 + i, COL_REGISTERS + mnColAddressRegisters + 4);
-        PrintRegisterValue(known, known && mpPreviousFrame != nullptr && mpPreviousFrame->a[i] != mpFrame->a[i], known ? mpFrame->a[i] : 0);
+        PrintRegisterValue(known, known && mpPreviousFrame != nullptr && mpPreviousFrame->a[i] != mpFrame->a[i], known ? mpFrame->a[i] : 0);  // a[7] already holds the effective a7
     }
     Tui::ResetAttributes();
 }
@@ -318,10 +639,95 @@ void DebugTuiView::DrawStatus()
         Tui::RepeatChar(' ', mnWidthStatus - 4);
     }
     Tui::ResetAttributes();
+    DrawCallerStatusLine();
+}
+
+static const char *GetMethodName(CallerMethod method)
+{
+    switch (method)
+    {
+    case CallerMethod::Shadow:
+        return "shadow";
+    case CallerMethod::A6:
+        return "a6";
+    default:
+        return "scan";
+    }
+}
+
+/// @brief Without room for the "Callers" panel: innermost caller on the last row of the Status box
+void DebugTuiView::DrawCallerStatusLine()
+{
+    if (mnCallerLines > 0)
+    {
+        return;
+    }
+    char text[40];
+    uint8_t color = COLOR_VALUE;
+    if (meCallersStatus == CallersStatus::Ok && mnCallerCount > 0)
+    {
+        snprintf(text, sizeof(text), "Caller $%06lx (%s)", (unsigned long)(maCallers[0].returnAddress & 0xffffff), GetMethodName(maCallers[0].method));
+    }
+    else if (meCallersStatus == CallersStatus::Ok)
+    {
+        snprintf(text, sizeof(text), "Caller: none found");
+        color = COLOR_VALUE_UNKNOWN;
+    }
+    else
+    {
+        snprintf(text, sizeof(text), "Caller: ?");
+        color = meCallersStatus == CallersStatus::Error ? COLOR_ERROR : COLOR_VALUE_UNKNOWN;
+    }
+    Tui::MoveTo(ROW_BOXES + 8, mnColStatus + 3);
+    Tui::SetForeground(color);
+    Tui::Print("%-*.*s", (int)mnWidthStatus - 4, (int)mnWidthStatus - 4, text);
+    Tui::ResetAttributes();
+}
+
+/// @brief "Callers" panel: one line per caller (innermost first): address, method, stack slot holding the address
+void DebugTuiView::DrawCallers()
+{
+    if (mnCallerLines <= 0)
+    {
+        return;
+    }
+    const int innerWidth = mnScreenWidth - 2;
+    for (int line = 0; line < mnCallerLines; ++line)
+    {
+        uint16_t row = mnRowCallers + 1 + line;
+        Tui::ResetAttributes();
+        Tui::FillLine(row, 2, innerWidth);
+        Tui::MoveTo(row, 3);
+        if (meCallersStatus == CallersStatus::Ok && line < mnCallerCount)
+        {
+            const Caller &caller = maCallers[line];
+            Tui::SetForeground(COLOR_LABEL);
+            Tui::Print("#%d  ", line);
+            Tui::SetForeground(COLOR_CODE_ADDRESS);
+            Tui::Print("$%06lx  ", (unsigned long)(caller.returnAddress & 0xffffff));
+            Tui::SetForeground(COLOR_VALUE);
+            Tui::SetBold(caller.method == CallerMethod::Shadow);
+            Tui::Print("%-6s", GetMethodName(caller.method));
+            Tui::SetBold(false);
+            Tui::SetForeground(COLOR_CODE_HEX);
+            Tui::Print("  stack $%06lx", (unsigned long)(caller.frameSp & 0xffffff));
+        }
+        else if (line == 0)
+        {
+            bool error = meCallersStatus == CallersStatus::Error;
+            Tui::SetForeground(error ? COLOR_ERROR : COLOR_VALUE_UNKNOWN);
+            Tui::Print("%s", error ? "? memory read failed" : (meCallersStatus == CallersStatus::Ok ? "No caller found" : "?"));
+        }
+    }
+    Tui::ResetAttributes();
 }
 
 void DebugTuiView::DrawCode()
 {
+    if (!mbShowCode)
+    {
+        return;
+    }
     const int innerWidth = mnScreenWidth - 2;
     // Margin, arrow and address on the left, up to DEBUG_INSTRUCTION_MAX_WORDS hex words on the right:
     // the instruction text takes the rest
@@ -335,14 +741,37 @@ void DebugTuiView::DrawCode()
         textWidth = DEBUG_INSTRUCTION_MAX_TEXT - 1;
     }
 
+    // History lines (executed instructions, or a "from" line) are drawn above the current instruction and take
+    // lines from the end of the listing. The oldest ones are dropped first, keeping HISTORY_MIN_LISTING lines.
+    HistoryRow historyRows[ExecutionHistory::MAX_ROWS];
+    int historyCount = 0;
+    const HistoryRow *pHistory = historyRows;
+    if (mpHistory != nullptr && mpFrame != nullptr)
+    {
+        historyCount = mpHistory->BuildRows(mpFrame->pc, historyRows);
+        int maxHistory = mnCodeLines - HISTORY_MIN_LISTING;
+        if (maxHistory < 0)
+        {
+            maxHistory = 0;
+        }
+        if (historyCount > maxHistory)
+        {
+            int skip = historyCount - maxHistory;
+            pHistory += skip;
+            historyCount -= skip;
+        }
+    }
+
     // Static: too large for the stack
     static DisassembledInstruction instructions[CODE_MAX_LINES];
-    int count = mpFrame != nullptr ? DisassembleFrame(mpFrame, instructions, mnCodeLines) : 0;
+    int count = mpFrame != nullptr ? DisassembleFrame(mpFrame, instructions, mnCodeLines - historyCount) : 0;
 
     for (int line = 0; line < mnCodeLines; ++line)
     {
-        uint16_t row = ROW_CODE + 1 + line;
-        bool current = line == 0;
+        uint16_t row = mnRowCode + 1 + line;
+        bool isHistory = line < historyCount;
+        int index = line - historyCount;    // Index in the listing
+        bool current = index == 0;
 
         Tui::ResetAttributes();
         if (current)
@@ -351,11 +780,31 @@ void DebugTuiView::DrawCode()
         }
         Tui::FillLine(row, 2, innerWidth);
 
-        if (line >= count)
+        if (isHistory)
+        {
+            Tui::MoveTo(row, 3);
+            Tui::SetForeground(COLOR_HISTORY);
+            const HistoryRow &historyRow = pHistory[line];
+            const DisassembledInstruction *past = &historyRow.pInstruction->instruction;
+            // Step out origin: "<- out of " is longer than "<- ", the text field is shortened so the words stay aligned
+            bool bStepOutOrigin = historyRow.isFromLine && historyRow.pInstruction->stepOutOrigin;
+            const char *prefix = bStepOutOrigin ? HISTORY_PREFIX_STEP_OUT : (historyRow.isFromLine ? "<- " : "   ");
+            int prefixExtra = (int)strlen(prefix) - 3;
+            Tui::Print("%s", prefix);
+            Tui::Print("%06lx  ", (unsigned long)(past->address & 0xffffff));
+            PrintTextAndTarget(past, textWidth - prefixExtra, COLOR_HISTORY, COLOR_TARGET_HISTORY, false);
+            Tui::SetForeground(COLOR_HISTORY);
+            for (int w = 0; w < past->wordCount; ++w)
+            {
+                Tui::Print(" %04x", past->words[w]);
+            }
+            continue;
+        }
+        if (index >= count)
         {
             continue;
         }
-        const DisassembledInstruction *instruction = &instructions[line];
+        const DisassembledInstruction *instruction = &instructions[index];
 
         Tui::MoveTo(row, 3);
         Tui::SetForeground(COLOR_CURRENT_ARROW);
@@ -364,14 +813,129 @@ void DebugTuiView::DrawCode()
         Tui::SetBold(false);
         Tui::SetForeground(COLOR_CODE_ADDRESS);
         Tui::Print(" %06lx  ", (unsigned long)(instruction->address & 0xffffff));
-        Tui::SetForeground(COLOR_CODE_TEXT);
-        Tui::SetBold(current);
-        Tui::Print("%-*.*s", textWidth, textWidth, instruction->truncated ? "..." : instruction->text);
-        Tui::SetBold(false);
+        PrintTextAndTarget(instruction, textWidth, COLOR_CODE_TEXT, COLOR_TARGET, current);
         Tui::SetForeground(COLOR_CODE_HEX);
         for (int w = 0; w < instruction->wordCount; ++w)
         {
             Tui::Print(" %04x", instruction->words[w]);
+        }
+    }
+    Tui::ResetAttributes();
+}
+
+/// @brief Hexadecimal + ASCII dump, 16 bytes per line. Bytes changed since the previous dump are highlighted
+/// in both columns; bytes not covered by the current dump are shown as "--".
+void DebugTuiView::DrawMemory()
+{
+    if (!mbShowMemory)
+    {
+        return;
+    }
+    const int innerWidth = mnScreenWidth - 2;
+    for (int line = 0; line < mnMemoryLines; ++line)
+    {
+        uint16_t row = mnRowMemory + 1 + line;
+        Tui::ResetAttributes();
+        Tui::FillLine(row, 2, innerWidth);
+
+        if (!mbHasMemoryAddress || mszMemoryError[0] != 0)
+        {
+            if (line == 0)
+            {
+                Tui::MoveTo(row, 3);
+                bool error = mszMemoryError[0] != 0;
+                Tui::SetForeground(error ? COLOR_ERROR : COLOR_VALUE_UNKNOWN);
+                Tui::Print("%.*s", innerWidth - 2, error ? mszMemoryError : "No address: press 'm' to enter one");
+            }
+            continue;
+        }
+
+        uint32_t lineAddress = mnMemoryAddress + (uint32_t)line * MEMORY_BYTES_PER_LINE;
+        Tui::MoveTo(row, 3);
+        Tui::SetForeground(COLOR_CODE_ADDRESS);
+        Tui::Print("%06lx  ", (unsigned long)(lineAddress & 0xffffff));
+
+        uint8_t values[MEMORY_BYTES_PER_LINE];
+        uint8_t known[MEMORY_BYTES_PER_LINE];
+        uint8_t changed[MEMORY_BYTES_PER_LINE];
+        MemoryWriteMarks::Kind marks[MEMORY_BYTES_PER_LINE];
+        bool inCursor[MEMORY_BYTES_PER_LINE];
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            uint32_t address = lineAddress + i;
+            known[i] = mpMemory != nullptr && mpMemory->GetByte(address, &values[i]);
+            changed[i] = known[i] && mpMemory->IsByteChanged(address);
+            marks[i] = mpWriteMarks != nullptr ? mpWriteMarks->Lookup(address) : MemoryWriteMarks::Kind::None;
+            inCursor[i] = mpEditCursor != nullptr && mpEditCursor->Contains(address);
+        }
+        // Edit mode: the digits typed so far replace the cell under the cursor
+        char pendingText[8] = "";
+        bool hasPending = mpEditCursor != nullptr && mpEditCursor->HasPending();
+        if (hasPending)
+        {
+            mpEditCursor->GetPendingText(pendingText);
+        }
+
+        // Colour of a byte: user written (red if the read-back differed, cyan otherwise) > changed by the program > normal
+        auto byteColor = [&](int i, uint8_t normal) -> uint8_t
+        {
+            if (!known[i])
+            {
+                return COLOR_VALUE_UNKNOWN;
+            }
+            if (marks[i] == MemoryWriteMarks::Kind::Differs)
+            {
+                return COLOR_ERROR;
+            }
+            if (marks[i] == MemoryWriteMarks::Kind::Written)
+            {
+                return COLOR_MEMORY_WRITTEN;
+            }
+            return changed[i] ? COLOR_VALUE_CHANGED : normal;
+        };
+
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            bool highlighted = changed[i] || marks[i] != MemoryWriteMarks::Kind::None;
+            Tui::SetReverse(inCursor[i]);
+            if (inCursor[i] && hasPending)
+            {
+                int offset = (int)(lineAddress + i - mpEditCursor->GetAddress());
+                Tui::SetForeground(COLOR_MEMORY_PENDING);
+                Tui::SetBold(true);
+                Tui::Print("%c%c", pendingText[offset * 2], pendingText[offset * 2 + 1]);
+            }
+            else
+            {
+                Tui::SetForeground(byteColor(i, COLOR_VALUE));
+                Tui::SetBold(highlighted);
+                if (known[i])
+                {
+                    Tui::Print("%02x", values[i]);
+                }
+                else
+                {
+                    Tui::Print("--");
+                }
+            }
+            Tui::SetBold(false);
+            Tui::SetReverse(false);
+            // 8-bit mode: a space after each byte; 16-bit mode: after each word (each byte keeps its own highlighting)
+            if (!mbMemoryWords || (i & 1))
+            {
+                Tui::Print(i == 7 ? "  " : " ");
+            }
+        }
+
+        Tui::Print(" ");
+        for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
+        {
+            Tui::SetForeground(byteColor(i, COLOR_MEMORY_ASCII));
+            Tui::SetBold(changed[i] || marks[i] != MemoryWriteMarks::Kind::None);
+            Tui::SetReverse(inCursor[i]);
+            Tui::Print("%c", (known[i] && values[i] >= 0x20 && values[i] < 0x7f) ? (char)values[i] : '.');
+            Tui::SetBold(false);
+            Tui::SetReverse(false);
         }
     }
     Tui::ResetAttributes();
@@ -388,28 +952,133 @@ void DebugTuiView::DrawMessage()
 
 void DebugTuiView::DrawHelp()
 {
-    static const char *keys[][2] =
+    /// Key of the help bar, with a long and a short form (the bar adapts to the terminal width, see below)
+    struct HelpKey
     {
-        { "s/Space", "Step" },
-        { "c/F5", "Continue" },
-        { "t/F2", "Classic view" },
-        { "r", "Redraw" },
-        { "x/Esc", "Exit" },
+        const char *key;
+        const char *label;
+        const char *keyShort;       // nullptr: same as key
+        const char *labelShort;     // nullptr: hidden in the short forms
+        bool memoryKey;             // Only displayed when the memory monitor is enabled
+        bool optional;              // Only displayed in the first level (long labels, two spaces), if it fits
     };
+    static const HelpKey keysStopped[] =
+    {
+        { "s", "Step", nullptr, "Step", false, false },
+        { "o", "Step over", nullptr, "Over", false, false },
+        { "u", "Step out", nullptr, "Out", false, false },
+        { "c", "Continue", nullptr, "Cont", false, false },
+        { "g", "Go to address", nullptr, "Goto", false, false },
+        { "m", "Memory", nullptr, "Mem", false, false },
+        { "w", "8/16-bit", nullptr, "8/16", true, false },
+        { "e", "Write memory", nullptr, "Write", false, false },
+        { "i", "Edit memory", nullptr, "Edit", true, false },
+        { "PgUp/PgDn", "Scroll", "Pg", "Scroll", true, true },
+        { "F3", "Code/Mem", nullptr, "Code/Mem", true, true },
+        { "t", "Switch view", nullptr, "View", false, false },
+        { "x", "Exit", nullptr, "Exit", false, false },
+    };
+    static const HelpKey keysRunning[] =
+    {
+        { "b", "Break", nullptr, "Break", false, false },
+        { "t", "Switch view", nullptr, "View", false, false },
+        { "x", "Exit", nullptr, "Exit", false, false },
+    };
+    static const HelpKey keysEdit[] =
+    {
+        { "0-9 a-f", "Hex value", "0-9a-f", "Value", false, false },
+        { "Enter", "Write", nullptr, "Write", false, false },
+        { "Backspace", "Erase digit", nullptr, nullptr, false, false },
+        { "Arrows", "Move", nullptr, "Move", false, false },
+        { "PgUp/PgDn", "Page", "Pg", "Page", false, false },
+        { "w", "8/16-bit", nullptr, "8/16", false, false },
+        { "Esc", "Cancel / Leave edit", nullptr, "Cancel/Quit", false, false },
+    };
+    const HelpKey *keys = keysStopped;
+    unsigned count = sizeof(keysStopped) / sizeof(keysStopped[0]);
+    if (meState == State::Running)
+    {
+        keys = keysRunning;
+        count = sizeof(keysRunning) / sizeof(keysRunning[0]);
+    }
+    else if (mpEditCursor != nullptr)
+    {
+        keys = keysEdit;
+        count = sizeof(keysEdit) / sizeof(keysEdit[0]);
+    }
+
+    // Levels tried in order, the first one that fits is used: long labels + 2 spaces (with the optional keys), long labels
+    // + 2 spaces, long + 1 space, short labels + 2 spaces, short + 1 space. If nothing fits, the last level is truncated.
+    struct Level
+    {
+        bool shortForm;
+        int separator;
+        bool optional;
+    };
+    static const Level levels[] = { { false, 2, true }, { false, 2, false }, { false, 1, false }, { true, 2, false }, { true, 1, false } };
+    const int levelCount = (int)(sizeof(levels) / sizeof(levels[0]));
+    const int available = (int)mnScreenWidth - 1;   // The text starts at column 2; the last cell of the line is never written
+    int chosen = levelCount - 1;
+    const HelpKey *visibleKeys[16];
+    const char *visibleKeyText[16];
+    const char *visibleLabel[16];
+    int visibleCount = 0;
+    for (int level = 0; level < levelCount; ++level)
+    {
+        const Level &lv = levels[level];
+        visibleCount = 0;
+        int width = 1;
+        for (unsigned i = 0; i < count && visibleCount < 16; ++i)
+        {
+            const HelpKey &k = keys[i];
+            bool isF3 = strcmp(k.key, "F3") == 0;
+            if ((k.memoryKey && !mbHasMemoryAddress) || (isF3 && mbBothPanels) || (k.optional && !lv.optional))
+            {
+                continue;
+            }
+            const char *label = lv.shortForm ? k.labelShort : k.label;
+            if (label == nullptr)
+            {
+                continue;
+            }
+            visibleKeys[visibleCount] = &k;
+            visibleKeyText[visibleCount] = (lv.shortForm && k.keyShort != nullptr) ? k.keyShort : k.key;
+            visibleLabel[visibleCount] = label;
+            width += (int)strlen(visibleKeyText[visibleCount]) + 1 + (int)strlen(label) + lv.separator;
+            ++visibleCount;
+        }
+        // The trailing separator is not displayed: it does not need room
+        if (width - lv.separator <= available || level == levelCount - 1)
+        {
+            chosen = level;
+            break;
+        }
+    }
+    const int separatorWidth = levels[chosen].separator;
+    const char *separator = separatorWidth == 2 ? "  " : " ";
+
     Tui::SetColors(COLOR_BAR_FG, COLOR_BAR_BG);
     // Last line of the screen: writing its last cell may scroll some terminals. Fill that cell with "erase to end
     // of line" instead, which uses the current background color on most terminals.
     Tui::FillLine(mnRowHelp, 1, mnScreenWidth - 1);
     Tui::ClearToEndOfLine();
     Tui::MoveTo(mnRowHelp, 2);
-    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
+    int column = 1;     // Cells used so far (the bar starts with one blank cell)
+    for (int i = 0; i < visibleCount; ++i)
     {
+        int keyWidth = (int)strlen(visibleKeyText[i]);
+        int labelWidth = (int)strlen(visibleLabel[i]);
+        if (column + keyWidth + 1 + labelWidth > available)
+        {
+            break;      // Last resort: truncated at a key boundary
+        }
         Tui::SetForeground(COLOR_BAR_KEY);
         Tui::SetBold(true);
-        Tui::Print("%s", keys[i][0]);
+        Tui::Print("%s", visibleKeyText[i]);
         Tui::SetBold(false);
         Tui::SetForeground(COLOR_BAR_FG);
-        Tui::Print(" %s   ", keys[i][1]);
+        Tui::Print(" %s%s", visibleLabel[i], separator);
+        column += keyWidth + 1 + labelWidth + separatorWidth;
     }
     Tui::ResetAttributes();
 }

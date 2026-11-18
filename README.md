@@ -35,7 +35,7 @@ You can ask any question here: [Delta Island forum](https://delta-island.com/bri
 - **Interactive command-line console** for ROM management, raw bus reads, tracing, and system control + diagnostic commands using a special diag ROM.
 - **Bus address tracer**: records the addresses accessed by the Neo Geo in a ring buffer for later inspection — useful to see where a board's CPU gets stuck.
 - **Frequency counter** on an extension input pin — handy to check clocks / sync signals on a suspect board.
-- **Live 68000 debugger**: with a trace-enabled ROM, single-step 68k code and see all registers, the status flags and a live disassembly of the next instructions, frame by frame.
+- **Live 68000 debugger**: with a trace-enabled ROM, single-step, step over, step out and break 68k code, with registers, status flags, a live disassembly, a memory monitor and a call stack, frame by frame.
 - **BricoExt extension protocol**: write your own diagnostic ROM that exposes custom commands, straight into the BricoNeo console (see [BricoExt](#bricoext-talking-back-from-your-own-rom)).
 - **Firmware updates over USB** (`BootSel` command, standard RP2 UF2 drag-and-drop).
 
@@ -164,9 +164,45 @@ cat UNIBIOS4.BIN > /dev/cu.usbmodemXXXX3  (macOS)
 
 - **`Trace on`** starts recording every address the Neo Geo requests on the bus into the input buffer (stops automatically once the buffer is full); `Trace off` reverts to normal buffer behaviour. Read the captured addresses back with `ReadWords`.
 - **`Freq`** reads the frequency present on the extension input pin (or its logic level, below 100 Hz) — useful to check that a clock or sync signal is actually toggling on a suspect board.
-- **`Dbg`** turns BricoNeo into a live 68000 debugger: it patches a conventional Neo Geo system ROM's TRACE interrupt vector (or expects a ROM that already declares one), resets the board, then shows, frame by frame, all data/address registers, the status register flags (T/S/IRQ/X/N/Z/V/C), the program counter and a short disassembly of the upcoming instructions. Press `s`/space to single-step, `c` to run to the next breakpoint/trace event, `x` to exit.
+- **`Dbg`** turns BricoNeo into a live 68000 debugger: it patches a conventional Neo Geo system ROM's TRACE interrupt vector (or expects a ROM that already declares one, such as the Brico68k ROM), resets the board, then shows, frame by frame, all data/address registers, the status register flags (T/S/IRQ/X/N/Z/V/C), the program counter, a disassembly of the upcoming instructions and the callers of the current function. The debugged code must reach the TRACE handler: trace mode has to be on in the code (e.g. the `Breakpoint` macro of Brico68k).
 
-  **Full screen view** — `Dbg tui` opens the same debugger as a full screen terminal UI: registers, flags and disassembly stay in place, and the registers and flags modified by the last step are highlighted. Background messages (ROM received...) go to a message line instead of breaking the screen. Press `t` (or F2) at any time to switch between the classic and the full screen views: the full screen view uses the terminal alternate screen, so the classic console comes back exactly as it was. Keys: `s`/space/Enter step, `c`/F5 continue, `r` redraw, `x`/Esc exit. The view adapts to the window size and follows its resizing (the size is polled every 500 ms, there is no resize notification on a serial line): wider windows give more room to the boxes and the disassembly, taller ones show more instructions (up to 25). It needs an ANSI terminal of at least 80x24 (PuTTY, Tera Term, Windows Terminal, GNU `screen`...); basic serial monitors without ANSI support should stick to the classic view. With GNU `screen` (macOS / Linux), add `altscreen on` to your `~/.screenrc`: alternate screen support is off by default in `screen`. Without it, the classic console is not restored when leaving the full screen view: BricoNeo detects it and continues below the last debugger screen.
+  Keys (the same in both views; the full screen help bar shows the main ones):
+
+  | Key | Action |
+  |---|---|
+  | `s`, space, Enter, F11 | Step one instruction (F11 is a plain step, as in Visual Studio) |
+  | `o`, F10 | Step over: a `jsr`, `bsr`, `trap` or `dbcc` runs to the instruction after it |
+  | `u` | Step out: runs until the current function returns to its caller |
+  | `c`, F5 | Continue: the 68k runs untraced until its next trace event (a breakpoint in the code) |
+  | `g` | Run to an address (expression, see below) |
+  | `b` | Break while running: stops at the next handler entry (needs trace mode in the code) |
+  | `m` | Memory monitor: type an address (see below). Empty input turns it off, Esc cancels |
+  | `w` | Switch the memory panel between 16-bit words (default) and bytes |
+  | `e` | Write memory: prompt `Write (addr value[.b|.w]): ` (see below). Empty input or Esc cancels |
+  | `i` | Full screen view only: edit the memory at a cursor (see "Memory edit mode"), needs the memory panel |
+  | PgUp / PgDn, Up / Down | Scroll the memory panel by a page / by a line of 16 bytes |
+  | F3 | Switch between the code and memory panels on small terminals (under 32 lines) |
+  | `t`, F2 | Switch between the classic and the full screen views |
+  | `r` | Redraw the screen |
+  | `x`, Esc | Exit. If the 68k is still traced, it is stopped first, then let run untraced |
+
+  **Addresses**: a hexadecimal number (`c0a000`, `$c0a000`, `0xc0a000`), a register (`d0`-`d7`, `a0`-`a7`, `sp`, `pc`), optionally followed by `+` or `-` and a hexadecimal offset (`a6-$10`). In the same prompt, `a0` is the register and `$a0` is the address $a0.
+
+  **Memory monitor**: once an address is set, the memory panel is read at every stop. Bytes changed since the previous stop are highlighted. Reads of `$300000-$3FFFFF` and of the BricoExt ports (`$C1FF00`, `$C1FF02` and their mirrors) are refused, as reading them has side effects. The panel shows up to 32 lines (512 bytes); from 32 terminal lines, code and memory are displayed together.
+
+  **Memory write** (`e`): `address value[.b|.w]`, for example `100000 1234`, `a6-4 ff.b`. The address is an expression (registers allowed), the value is hexadecimal (`$` / `0x` optional, at most `$FF` for a byte, `$FFFF` for a word). The size follows the memory monitor mode (`w`: 16-bit words by default) unless a `.b` / `.w` suffix forces it. After the write, the unit is read back and reported (`Written $xx at $xxxxxx`, or a warning if the value read differs: ROM or not writable); the memory panel and, if the write overlaps the code read at PC, the disassembly are refreshed. A word write at an odd address, the BricoExt ports, an address above `$FFFFFF` and the handler's own stack (the 66 bytes below the stacked SSP: saved registers and exception frame) are refused with an explanation. A write to `$300000-$3FFFFF` (I/O registers) asks for a confirmation (`y`) and is not read back, as reading has side effects.
+
+  **Memory edit mode** (full screen view, memory panel displayed): `i` edits the memory at a cursor (`e` still opens the prompt; if the panel is not displayed, `i` says what to do: `m` to enable the monitor, F3 to show the panel) (the title reads `Memory [EDIT]`). The cursor (reverse video, on the hex column and the matching ASCII characters) is one byte or one word depending on `w` (always even in word mode; `w` keeps the address) and starts on the first cell of the zone. Arrows move by one cell / one line and scroll the zone by one line at the edges, PgUp / PgDn move by a page. Hex digits fill a pending value (shown in place of the cell, right-aligned, in magenta); the value is written when the cell is complete (2 / 4 digits) or on Enter (zero-extended), then the cursor advances. Backspace removes a digit; Esc cancels the pending value, a second Esc leaves the mode. The rules are those of the prompt (refusals, `y` confirmation in `$300000-$3FFFFF`, read-back). Cells written at the current stop are cyan (red if the read-back differs: ROM...) until the next step; bytes changed by the program stay yellow. While editing, `s o u c g m x t` and the F-keys are ignored (`a-f` are digits, `e` included): press Esc first. Resize and `r` keep working; if the memory panel disappears the mode is left.
+
+  **Execution history**: after a plain step through linear code, up to 2 previously executed instructions are shown dimmed above the current one. After a flow break (taken branch, `jsr`, `rts`, exception...), a single `<-` line shows the instruction that jumped. After a step out, the line reads `<- out of`. Branch targets are shown as `($xxxxxx)`. The history is cleared by `c`, `g`, a break and any communication error.
+
+  **Callers**: the "Callers" panel (3 to 5 lines, innermost first) lists the return addresses of the current call chain, each one as `#n $addr method stack $addr`, where `$addr` after `stack` is the stack slot holding the return address. The method says how it was found: `shadow` is exact (calls followed by stepping since the last reset, break or continue), `a6` comes from the frame chain built by `LINK` (compiled code), `scan` is a heuristic (a long word preceded by a `JSR`/`BSR`), so it may be wrong. On an 80x24 terminal the innermost caller is shown on the last line of the status box, and in the classic view as a `Caller:` line.
+
+  **Step out limits**: `u` runs to the innermost caller's return address, with the stack above its slot. It is exact when the function was entered by stepping (`shadow`). After a break, a `g` or a breakpoint, it relies on `a6` or `scan` and can stop at the wrong place or never: use `b` then. Only the supervisor stack is followed; a TRAP taken in user mode invalidates the shadow stack.
+
+  **Full screen view** — `Dbg tui` opens the same debugger as a full screen terminal UI: registers, flags and disassembly stay in place, and the registers and flags modified by the last step are highlighted. Background messages (ROM received...) go to a message line instead of breaking the screen. Press `t` (or F2) at any time to switch between the classic and the full screen views: the full screen view uses the terminal alternate screen, so the classic console comes back exactly as it was. The view adapts to the window size and follows its resizing (the size is polled every 500 ms, there is no resize notification on a serial line): wider windows give more room to the boxes and the disassembly, taller ones show more instructions (up to 50, the number of code words read at each stop). It needs an ANSI terminal of at least 80x24 (PuTTY, Tera Term, Windows Terminal, GNU `screen`...); basic serial monitors without ANSI support should stick to the classic view. With GNU `screen` (macOS / Linux), add `altscreen on` to your `~/.screenrc`: alternate screen support is off by default in `screen`. Without it, the classic console is not restored when leaving the full screen view: BricoNeo detects it and continues below the last debugger screen.
+
+  **Host tests**: the pure logic (address expressions, memory dump, memory edit cursor, branch targets, instruction classification, call stack, disassembler) has host tests in [`HostTests/`](HostTests). Each `HostTests/build_*.sh` script compiles one test with the MSYS2 g++ (`C:/msys64/mingw64/bin/g++`, or the `CXX` variable), runs it and writes the executable to the temp directory. They are not part of the Pico build.
 
 ![BricoNeo board](Images/Trace.png)
 
@@ -239,8 +275,17 @@ MassStorageManager         USB mass-storage (drag & drop ROM loading) implementa
 OpcodeDecoder               Minimal 68000 disassembler used by the live debugger
 DisplayResult / InputBuffer Console output formatting and Neo Geo -> PC buffer
 Tui                        Minimal full screen terminal UI layer (alternate screen, drawing, key decoding)
+Commands/CommandDebug      The Dbg command: key handling, stop loop, classic view
 Commands/DebugTuiView      Full screen view of the live debugger (Dbg tui)
 Commands/DebugFrame        Debug frame structure and disassembly shared by both debugger views
+Commands/DebugProtocol.h   Debugger protocol v2 constants (must match Brico68k inc/trace.inc)
+Commands/DebugLink         Pico side of the protocol: stop frames, commands, READ_MEM, resynchronisation
+Commands/DebugExpression   Address expression parser (hex, registers, +/- offset)
+Commands/MemoryDump        Memory monitor data: current and previous dump, changed bytes
+Commands/CallStack         Call stack analysis (shadow stack, A6 chain, stack scan)
+Commands/InstructionFlow.h Control flow classes of instructions (call, trap, loop, return)
+Commands/TraceRoutine.h    TRACE handler injected into a standard BIOS (generated from Brico68k Trace.s)
+HostTests/                 Host (MSYS2 g++) tests of the pure debugger logic, not part of the Pico build
 ```
 
 ## Some videos showing the board in action
