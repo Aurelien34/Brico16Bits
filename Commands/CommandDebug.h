@@ -2,6 +2,7 @@
 
 #include "Command.h"
 #include "DebugTuiView.h"
+#include "DebugLink.h"
 
 class CommandDebug : public Command
 {
@@ -27,9 +28,10 @@ private:
     static Action ReadAction();
     static void ServiceBackgroundTasks(DebugTuiView &view);
     void ToggleView(DebugTuiView &view, const DebugFrame *pFrame, bool bWaitingForCommand);
-    static void DecodeFrame(const uint16_t *raw, DebugFrame *frame);
+    struct WaitContext;
+    static bool PollWaiting(void *context);
+    static void ReportLinkError(DebugTuiView &view, char *returnMessage, int messageMaxSize, const char *what, const DebugLink &link);
     void ShowFrameClassic(const DebugFrame *frame);
     void ShowSplitter();
     void RepeatChars(char c, int16_t count);
-    static uint16_t gwTraceRoutine[87];
 };

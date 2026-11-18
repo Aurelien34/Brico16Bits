@@ -251,7 +251,7 @@ void DebugTuiView::DrawRegisters()
         Tui::MoveTo(ROW_BOXES + 1 + i, COL_REGISTERS + 7);
         PrintRegisterValue(known, known && mpPreviousFrame != nullptr && mpPreviousFrame->d[i] != mpFrame->d[i], known ? mpFrame->d[i] : 0);
         Tui::MoveTo(ROW_BOXES + 1 + i, COL_REGISTERS + mnColAddressRegisters + 4);
-        PrintRegisterValue(known, known && mpPreviousFrame != nullptr && mpPreviousFrame->a[i] != mpFrame->a[i], known ? mpFrame->a[i] : 0);
+        PrintRegisterValue(known, known && mpPreviousFrame != nullptr && mpPreviousFrame->a[i] != mpFrame->a[i], known ? mpFrame->a[i] : 0);  // a[7] already holds the effective a7
     }
     Tui::ResetAttributes();
 }

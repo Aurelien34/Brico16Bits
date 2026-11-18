@@ -9,25 +9,41 @@
 
 #include "CommandDebug.h"
 #include "CommandManager.h"
+#include "BricoExtManager.h"
+#include "DebugLink.h"
+#include "DebugProtocol.h"
 #include "InputBuffer.h"
 #include "MassStorageManager.h"
 #include "PIOManager.h"
 #include "ROMImageManager.h"
 #include "ROMUploadManager.h"
 #include "Tui.h"
+#include "TraceRoutine.h"
 
 #define COMMAND_NAME "Dbg"
 
 #define COMMAND_DESC_PARAMETERS "[tui]"
 #define COMMAND_DESC_TEXT "Enter 68000 debug mode. Need to activate trace mode in 68k code and declare TRACE interrupt vector. 'tui' for the full screen view"
 
-#define FRAME_SIZE_REGISTER 2
-#define FRAME_SIZE_WORD 1
-#define FRAME_SIZE (FRAME_SIZE_REGISTER) * 8 * 2 /* Data and address registers */ \
-                    + FRAME_SIZE_WORD /* SR register */ \
-                    + FRAME_SIZE_REGISTER /* PC register */ \
-                    + 25 * FRAME_SIZE_WORD /* PC memory neighbourhood */ \
-                    + FRAME_SIZE_WORD /* Frame counter */
+static_assert(TRACE_ROUTINE_SIZE_BYTES <= BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES, "TRACE handler too big for the BIOS patch area");
+static_assert(sizeof(gwTraceRoutine) == TRACE_ROUTINE_SIZE_BYTES, "Inconsistent TraceRoutine.h");
+
+#define TRACE_ROUTINE_ADDRESS_68K (0xC00000u + BIOS_PATCH_TRACE_ROUTINE_OFFSET)
+
+/// @brief Size in words of the v1 stop frame (only used to recognise an old handler)
+#define DEBUG_V1_FRAME_WORDS 59
+
+#define MESSAGE_UNRECOGNIZED_FRAME "Unrecognized frame received - TRACE handler from another version?"
+
+/// @brief State shared with the poll callback called by DebugLink::WaitStop
+struct CommandDebug::WaitContext
+{
+    CommandDebug *self;
+    DebugTuiView *view;
+    DebugLink *link;
+    const DebugFrame *pFrameToShow;  ///< Frame shown if the view is toggled while waiting (nullptr if none)
+    uint32_t nUnrecognizedSeen;
+};
 
 void CommandDebug::GetCommandName(char *name) const
 {
@@ -58,22 +74,19 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         bTuiMode = true;
     }
 
-    // Clear the input buffer
-    InputBuffer::CheckEOTSignalAndClearEOT();
-    uint16_t tmp;
-    while(InputBuffer::GetValue(&tmp));
-
     printf("Trying to detect a NeoGeo conventional system ROM to patch its Trace interrupt vector...\n");
     if (*(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + ROM_OFFSET_OFFICIAL_TRACE_VECTOR) == 0x00c0 && *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + ROM_OFFSET_OFFICIAL_TRACE_VECTOR + 2) == 0x0420)
     {
-        printf("- ROM detected. Patching original Trace interrupt routine @ 0x0c0024 to point to random numbers area @ 0x0c4200...\n");
+        printf("- ROM detected. Patching original Trace interrupt routine @ 0x0c0024 to point to the trace routine @ 0x%06x...\n", (unsigned)TRACE_ROUTINE_ADDRESS_68K);
         *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + 0x0420) = 0x4ef9;        // jmp opcode
-        *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + 0x0420 + 2) = 0x00c0;        // Random numbers high
-        *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + 0x0420 + 4) = 0x4200;    // Random numbers low
-        printf("- Injecting trace routine in the random numbers area...\n");
+        *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + 0x0420 + 2) = (uint16_t)(TRACE_ROUTINE_ADDRESS_68K >> 16);        // Trace routine address high
+        *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + 0x0420 + 4) = (uint16_t)(TRACE_ROUTINE_ADDRESS_68K & 0xffff);    // Trace routine address low
+        printf("- Injecting trace routine in the random numbers area: overwriting image offsets 0x%05x-0x%05x (68k 0x%06x-0x%06x), %d bytes...\n",
+            (unsigned)BIOS_PATCH_TRACE_ROUTINE_OFFSET, (unsigned)(BIOS_PATCH_TRACE_ROUTINE_OFFSET + TRACE_ROUTINE_SIZE_BYTES - 1),
+            (unsigned)TRACE_ROUTINE_ADDRESS_68K, (unsigned)(TRACE_ROUTINE_ADDRESS_68K + TRACE_ROUTINE_SIZE_BYTES - 1), (int)TRACE_ROUTINE_SIZE_BYTES);
         for (int i = 0; i < sizeof(gwTraceRoutine) / sizeof(gwTraceRoutine[0]); ++i)
         {
-            *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + 0x4200 + i * 2) = gwTraceRoutine[i];
+            *(uint16_t *)(BASE_ADDRESS_IMAGE_IN_RAM + BIOS_PATCH_TRACE_ROUTINE_OFFSET + i * 2) = gwTraceRoutine[i];
         }
         printf("- Patching first instruction (move #0x2700,SR becomes move #0xa700,SR) to force SR Trace flag...\n");
         // Read the reset vector
@@ -105,8 +118,18 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         printf("Found non conventional system ROM. Hoping Trace routine has been configured.\n");
     }
 
+    DebugLink::ResetMailbox();
+
     printf("Resetting the NeoGeo board...\n");
     PIOManager::ForceWatchdogReset();
+
+    // Drop whatever a previous handler (woken up by ResetMailbox) or the reset itself may have sent: words and EOT
+    InputBuffer::Clear(true);
+    {
+        InputBuffer::CheckEOTSignalAndClearEOT();
+        uint16_t tmp;
+        while (InputBuffer::GetValue(&tmp)) { }
+    }
 
     printf("Waiting for debug frame from remote. Press 'x' to exit at any time, 't' to switch to the %s view...\n", bTuiMode ? "classic" : "full screen");
 
@@ -117,51 +140,54 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         view.SetMessage("Waiting for a debug frame from the 68k...");
     }
 
+    DebugLink link;
     DebugFrame frames[2];
     DebugFrame *pFrame = &frames[0];
     DebugFrame *pPreviousFrame = nullptr;
     uint32_t nStepCount = 0;
+    uint16_t nFrameNumber = 0;  // Stop counter (+1 per stop)
+    WaitContext waitContext = { this, &view, &link, nullptr, 0 };
 
     while (true)
     {
-        // Wait for remote information...
-        while (!InputBuffer::CheckEOTSignalAndClearEOT())
+        // Wait for a stop frame from the 68k...
+        waitContext.pFrameToShow = nStepCount > 0 ? pPreviousFrame : nullptr;
+        DebugStop stop;
+        if (!link.WaitStop(&stop, PollWaiting, &waitContext))
         {
-            ServiceBackgroundTasks(view);
-            switch (ReadAction())
-            {
-            case Action::Exit:
-                view.Leave();
-                snprintf(returnMessage, messageMaxSize, "User interrupted debug frame download");
-                InputBuffer::Clear(true);
-                return false;
-            case Action::ToggleView:
-                ToggleView(view, nStepCount > 0 ? pPreviousFrame : nullptr, false);
-                break;
-            case Action::Redraw:
-                view.Redraw();
-                break;
-            case Action::Resize:
-                view.Redraw(false);
-                break;
-            default:
-                break;
-            }
+            view.Leave();
+            snprintf(returnMessage, messageMaxSize, "User interrupted debug frame download");
+            InputBuffer::Clear(true);
+            return false;
         }
 
-        // Stopped waiting
-        // Frame received, read it
-        uint16_t frameContentRaw[FRAME_SIZE];
-        for (int i = 0; i < FRAME_SIZE; ++i)
+        // Stopped: read the registers, then the code at PC
+        DebugRegisters regs;
+        if (!link.GetRegisters(&regs))
         {
-            if (!InputBuffer::GetValue(frameContentRaw + i))
+            ReportLinkError(view, returnMessage, messageMaxSize, "Unable to read the registers", link);
+            return false;
+        }
+        for (int i = 0; i < 8; ++i)
+        {
+            pFrame->d[i] = regs.d[i];
+            pFrame->a[i] = i < 7 ? regs.a[i] : regs.GetA7();
+        }
+        pFrame->ssp = regs.ssp;
+        pFrame->usp = regs.usp;
+        pFrame->sr = regs.sr;
+        pFrame->pc = regs.pc;
+        pFrame->frameNumber = ++nFrameNumber;
+        if (!link.ReadMemory(regs.pc, DEBUG_FRAME_CODE_WORDS, pFrame->code, false))
+        {
+            if (link.GetLastError() != DebugLinkError::InvalidArgument)
             {
-                view.Leave();
-                snprintf(returnMessage, messageMaxSize, "Incorrect frame data size received");
+                ReportLinkError(view, returnMessage, messageMaxSize, "Unable to read the code at PC", link);
                 return false;
             }
+            // Code not readable (e.g. PC in the $300000-$3FFFFF zone): display empty code
+            memset(pFrame->code, 0, sizeof(pFrame->code));
         }
-        DecodeFrame(frameContentRaw, pFrame);
         ++nStepCount;
 
         // Display the frame. The full screen view always keeps track of it (it only draws when active),
@@ -178,7 +204,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
 
         // Wait for a user command
         bool bWaiting = true;
-        uint16_t debugCommand = 0;
+        DebugCommand debugCommand = DebugCommand::Step;
         while (bWaiting)
         {
             ServiceBackgroundTasks(view);
@@ -189,7 +215,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 {
                     printf("> step\n");
                 }
-                debugCommand = 0;
+                debugCommand = DebugCommand::Step;
                 bWaiting = false;
                 break;
             case Action::Continue:
@@ -202,10 +228,12 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 {
                     printf("> continue...\n");
                 }
-                debugCommand = 1;
+                debugCommand = DebugCommand::Continue;
                 bWaiting = false;
                 break;
             case Action::Exit:
+                // The 68k is blocked in the handler: let it go on instead of leaving it frozen
+                link.Resume(DebugCommand::Continue);
                 view.Leave();
                 snprintf(returnMessage, messageMaxSize, "Debug interrupted");
                 return true;
@@ -226,19 +254,72 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         // The displayed frame becomes the reference for highlighting changes
         pPreviousFrame = pFrame;
         pFrame = (pFrame == &frames[0]) ? &frames[1] : &frames[0];
-        view.SetState(debugCommand == 1 ? DebugTuiView::State::Running : DebugTuiView::State::Waiting);
+        view.SetState(debugCommand == DebugCommand::Continue ? DebugTuiView::State::Running : DebugTuiView::State::Waiting);
 
-        // Send command
-        ROMImageManager::GetImageBaseAddressB()[0x1fffc] = (uint8_t)debugCommand;
-        ROMImageManager::GetImageBaseAddressB()[0x1fffd] = (uint8_t)(debugCommand >> 8);
-
-        // Send back incremented frame number to send the debug command to the 68k
-        uint16_t frameNumber = pPreviousFrame->frameNumber + 1;
-        ROMImageManager::GetImageBaseAddressB()[0x1fffe] = (uint8_t)frameNumber;
-        ROMImageManager::GetImageBaseAddressB()[0x1ffff] = (uint8_t)(frameNumber >> 8);
+        // Send the command to the 68k
+        link.Resume(debugCommand);
     }
 
     return true;
+}
+
+/// @brief Called by DebugLink::WaitStop while waiting for a stop frame. Returns false to abandon the wait.
+bool CommandDebug::PollWaiting(void *context)
+{
+    WaitContext *ctx = (WaitContext *)context;
+    ServiceBackgroundTasks(*ctx->view);
+
+    // Non blocking warning when the 68k sent a frame we do not understand.
+    // Only meaningful for a 59 words frame (v1 handler signature), and never with a BricoNeo/Brico68k
+    // system ROM: its traced code legitimately sends BricoExt frames of any length.
+    uint32_t unrecognized = ctx->link->GetUnrecognizedFrameCount();
+    if (unrecognized != ctx->nUnrecognizedSeen)
+    {
+        ctx->nUnrecognizedSeen = unrecognized;
+        if (BricoExtManager::IsBricoNeoROM() || ctx->link->GetLastUnrecognizedWordCount() != DEBUG_V1_FRAME_WORDS)
+        {
+            // no message
+        }
+        else if (Tui::IsActive())
+        {
+            ctx->view->SetMessage(MESSAGE_UNRECOGNIZED_FRAME, true);
+        }
+        else
+        {
+            printf("%s\n", MESSAGE_UNRECOGNIZED_FRAME);
+        }
+    }
+
+    switch (ReadAction())
+    {
+    case Action::Exit:
+        return false;
+    case Action::ToggleView:
+        ctx->self->ToggleView(*ctx->view, ctx->pFrameToShow, false);
+        break;
+    case Action::Redraw:
+        ctx->view->Redraw();
+        break;
+    case Action::Resize:
+        ctx->view->Redraw(false);
+        break;
+    default:
+        break;
+    }
+    return true;
+}
+
+/// @brief Report a link error (response timeout, short response...) in both views and prepare the command return message
+void CommandDebug::ReportLinkError(DebugTuiView &view, char *returnMessage, int messageMaxSize, const char *what, const DebugLink &link)
+{
+    char text[100];
+    snprintf(text, sizeof(text), "%s: %s", what, DebugLink::GetErrorText(link.GetLastError()));
+    if (Tui::IsActive())
+    {
+        view.SetMessage(text, true);
+    }
+    view.Leave();
+    snprintf(returnMessage, messageMaxSize, "%s", text);
 }
 
 void CommandDebug::ServiceBackgroundTasks(DebugTuiView &view)
@@ -316,19 +397,6 @@ void CommandDebug::ToggleView(DebugTuiView &view, const DebugFrame *pFrame, bool
     }
 }
 
-void CommandDebug::DecodeFrame(const uint16_t *raw, DebugFrame *frame)
-{
-    for (int i = 0; i < 8; ++i)
-    {
-        frame->d[i] = ((uint32_t)raw[i * 2] << 16) | raw[i * 2 + 1];
-        frame->a[i] = ((uint32_t)raw[i * 2 + 16] << 16) | raw[i * 2 + 17];
-    }
-    frame->sr = raw[FRAME_SIZE_REGISTER * 8 * 2];
-    frame->pc = ((uint32_t)raw[FRAME_SIZE_REGISTER * 8 * 2 + 1] << 16) | raw[FRAME_SIZE_REGISTER * 8 * 2 + 2];
-    memcpy(frame->code, raw + FRAME_SIZE_REGISTER * 8 * 2 + 3, sizeof(frame->code));
-    frame->frameNumber = raw[FRAME_SIZE - 1];
-}
-
 /// @brief Classic (scrolling) display of a debug frame
 void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
 {
@@ -341,7 +409,8 @@ void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
     uint32_t programcounter = frame->pc;
     for (int i = 0; i < 8; ++i)
     {
-        printf("|  d%d: %08lx   |   a%d: %08lx   |  ", i, (unsigned long)frame->d[i], i, (unsigned long)frame->a[i]);
+        unsigned long addressRegister = frame->a[i];  // a[7] already holds the effective a7
+        printf("|  d%d: %08lx   |   a%d: %08lx   |  ", i, (unsigned long)frame->d[i], i, addressRegister);
         switch (i)
         {
         case 1:
@@ -427,8 +496,3 @@ void CommandDebug::RepeatChars(char c, int16_t count)
     }
 }
 
-
-uint16_t CommandDebug::gwTraceRoutine[] =
-{
-    0x13c0, 0x0030, 0x0001, 0x48e7, 0xffff, 0x3e3c, 0x001f, 0x3c3c, 0x0000, 0x3037, 0x6000, 0x616c, 0x5446, 0x51cf, 0xfff6, 0x302f, 0x0040, 0x6160, 0x302f, 0x0042, 0x615a, 0x302f, 0x0044, 0x6154, 0x302f, 0x0042, 0x4840, 0x302f, 0x0044, 0x2040, 0x3e3c, 0x0018, 0x3018, 0x6140, 0x51cf, 0xfffa, 0x3039, 0x00c1, 0xfffe, 0x6134, 0x3e39, 0x00c1, 0xff00, 0x13c0, 0x0030, 0x0001, 0x3239, 0x00c1, 0xfffe, 0xb240, 0x67f0, 0x3039, 0x00c1, 0xfffc, 0x4a40, 0x670e, 0xb07c, 0x0001, 0x6702, 0x6006, 0x026f, 0x7fff, 0x0040, 0x4cdf, 0xffff, 0x4e73, 0x48e7, 0xc080, 0x40c1, 0xc0bc, 0x0000, 0xffff, 0xe388, 0xd0bc, 0x00c2, 0x0000, 0xc188, 0x46fc, 0x2700, 0x3039, 0x00c1, 0xff02, 0x3010, 0x46c1, 0x4cdf, 0x0103, 0x4e75
-};
