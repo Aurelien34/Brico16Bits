@@ -5,6 +5,7 @@
 #include "CallStack.h"
 #include "DebugFrame.h"
 #include "MemoryDump.h"
+#include "MemoryCursor.h"
 
 /// @brief An instruction that was really executed (first instruction of a previous stop), kept with the context
 /// needed to display it and to feed the call stack analysis (T8 / T10)
@@ -125,6 +126,15 @@ public:
     /// @brief true: 16-bit words (default), false: bytes
     void SetMemoryWordMode(bool words);
     void ShowMemory(const MemoryDump *dump, bool hasAddress, uint32_t address, const char *error);
+    /// @brief Redraw the memory panel only (cursor moved, digit typed...)
+    void RedrawMemory();
+    /// @brief Cells written by the user at this stop (cyan, red if the read-back differed). Must stay valid; nullptr: none.
+    void SetWriteMarks(const MemoryWriteMarks *marks) { mpWriteMarks = marks; }
+    /// @brief Edit mode of the memory panel (T14): cursor displayed in reverse video, pending value in its own colour,
+    /// "[EDIT]" in the title and edit keys in the help bar. nullptr leaves the edit mode. The cursor must stay valid.
+    /// Redraws the screen when the mode changes.
+    void SetMemoryEdit(const MemoryCursor *cursor);
+    bool IsMemoryEdit() const { return mpEditCursor != nullptr; }
 
 private:
     void ComputeLayout();
@@ -158,6 +168,8 @@ private:
     bool mbHasMemoryAddress = false;
     uint32_t mnMemoryAddress = 0;
     char mszMemoryError[96] = "";
+    const MemoryCursor *mpEditCursor = nullptr;         // Edit mode: cursor to draw
+    const MemoryWriteMarks *mpWriteMarks = nullptr;
 
     // Callers (call stack) at the current stop
     Caller maCallers[DEBUG_CALLERS_MAX_LINES];

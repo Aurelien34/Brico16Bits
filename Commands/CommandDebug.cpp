@@ -13,6 +13,7 @@
 #include "DebugLink.h"
 #include "DebugExpression.h"
 #include "MemoryDump.h"
+#include "MemoryCursor.h"
 #include "DebugProtocol.h"
 #include "InputBuffer.h"
 #include "MassStorageManager.h"
@@ -26,7 +27,7 @@
 #define COMMAND_NAME "Dbg"
 
 #define COMMAND_DESC_PARAMETERS "[tui]"
-#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s/F11 step, o/F10 step over, u step out, c continue, g run to addr, b break, m memory address (empty = off; hex, $hex, d0-a7, sp, pc, +/-hex), w 8/16-bit, e write, PgUp/Dn scroll, F3 code/mem, x exit"
+#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector; 'tui' = full screen). Keys: s/F11 step, o/F10 step over, u step out, c continue, g run to addr, b break, m memory address (empty=off; hex, $hex, d0-a7, sp, pc, +/-hex), w 8/16-bit, e write, i edit at cursor (tui), PgUp/Dn, F3 code/mem, x exit"
 static_assert(sizeof(COMMAND_DESC_TEXT) <= COMMAND_MAX_LENGTH_DESC_TEXT, "Command description too long");
 
 static_assert(TRACE_ROUTINE_SIZE_BYTES <= BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES, "TRACE handler too big for the BIOS patch area");
@@ -430,6 +431,9 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     printf("Waiting for debug frame from remote. Press 'x' to exit at any time, 't' to switch to the %s view...\n", bTuiMode ? "classic" : "full screen");
 
     MemoryState memory;
+    MemoryWriteMarks marks;     // Cells written by the user at the current stop
+    MemoryCursor editCursor;    // T14: memory panel edit mode
+    bool bEdit = false;
     mHistory.Clear();
     mCallStack.Reset();
     mCallerCount = 0;
@@ -438,6 +442,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     DebugTuiView view;
     view.SetHistory(&mHistory);
     view.SetMemoryWordMode(memory.words);
+    view.SetWriteMarks(&marks);
     view.ShowMemory(&memory.dump, false, 0, nullptr);
     if (bTuiMode)
     {
@@ -591,67 +596,34 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         }
     };
 
-    // 'e' (T13): write one byte or word at an address, with read-back. The size is the memory monitor mode unless the
-    // value has a .b / .w suffix. $300000-$3FFFFF (I/O) needs a confirmation. Link errors (timeout...) are only
-    // reported, like a failed monitor read: the debugger stays usable and the 68k is still waiting in its handler.
-    auto handleWriteAction = [&]()
+    // Write one byte or word with the T13 rules (shared by the 'e' prompt and the edit mode of the memory panel):
+    // refusals explained, $300000-$3FFFFF confirmation (y/n), read-back (except in $3xxxxx), code at PC and memory zone
+    // refreshed without shifting the "previous" dump, result in the message line. Link errors are only reported.
+    // The write is recorded in "marks" (displayed until the next stop).
+    // @return true if the value was written (even if the read-back differs), false if refused, cancelled or failed
+    auto writeUnit = [&](uint32_t address, uint32_t value, bool word) -> bool
     {
-        char text[80];
-        bool validated;
-        if (Tui::IsActive())
-        {
-            validated = view.PromptInput("Write (addr value[.b|.w]): ", text, sizeof(text), IdleWhilePrompting);
-        }
-        else
-        {
-            printf("Write: address value[.b|.w], hex ('$' / '0x' optional), address = expression (d0-d7, a0-a7, sp, pc, +/-hex).\n"
-                   "Size = %s unless .b / .w ('w' switches). Enter alone or Esc = cancel.\nwrite> ", memory.words ? "16-bit word" : "8-bit byte");
-            Tui::Flush();
-            validated = Tui::ReadLine(0, 0, 0, text, sizeof(text), IdleWhilePrompting);
-        }
-        if (!validated || text[0] == 0)
-        {
-            return;
-        }
         char error[160];
-        WriteCommand cmd;
-        if (!ParseWriteCommand(text, &cmd, error, sizeof(error)))
-        {
-            showMessage(error, true);
-            return;
-        }
-        uint32_t address;
-        if (!DebugExpression::Parse(cmd.addressText, pFrame, &address))
-        {
-            snprintf(error, sizeof(error), "Invalid address expression: '%.60s'", cmd.addressText);
-            showMessage(error, true);
-            return;
-        }
-        bool word = cmd.hasSize ? cmd.word : memory.words;
-        if (!word && cmd.value > 0xff)
-        {
-            showMessage("Value too large for a byte (max $FF, use .w for a word)", true);
-            return;
-        }
+        bool validated;
         uint32_t size = word ? 2 : 1;
-        uint32_t expected = word ? cmd.value : (cmd.value & 0xff);
+        uint32_t expected = word ? value : (value & 0xff);
         // The refusals of DebugLink::WriteMemory, explained here
         if (address > 0xffffffu)
         {
             showMessage("Address above $FFFFFF: the 68000 bus has 24 bits", true);
-            return;
+            return false;
         }
         if (word && (address & 1))
         {
             snprintf(error, sizeof(error), "Odd address $%06lx: a word write needs an even address (use .b)", (unsigned long)address);
             showMessage(error, true);
-            return;
+            return false;
         }
         if (address >= 0xc00000u && address <= 0xcfffffu && ((address & 0x1fffe) == 0x1ff00 || (address & 0x1fffe) == 0x1ff02))
         {
             snprintf(error, sizeof(error), "$%06lx is a BricoExt port (or a mirror): never written", (unsigned long)address);
             showMessage(error, true);
-            return;
+            return false;
         }
         bool bIo = address <= 0x3fffffu && address + size - 1 >= 0x300000u;
         if (bIo)
@@ -672,10 +644,10 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
             if (!validated || (answer[0] != 'y' && answer[0] != 'Y'))
             {
                 showMessage("Write cancelled", false);
-                return;
+                return false;
             }
         }
-        if (!link.WriteMemory(address, (uint16_t)cmd.value, word, bIo))
+        if (!link.WriteMemory(address, (uint16_t)value, word, bIo))
         {
             if (link.GetLastError() == DebugLinkError::InvalidArgument)
             {
@@ -688,13 +660,14 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 snprintf(error, sizeof(error), "Write at $%06lx failed: %s", (unsigned long)address, DebugLink::GetErrorText(link.GetLastError()));
             }
             showMessage(error, true);
-            return;
+            return false;
         }
 
         // Read-back (not in $3xxxxx: side effects). A byte is extracted from its containing word (big-endian).
         char result[160];
         int digits = word ? 4 : 2;
         bool bResultIsError = false;
+        bool bDiffers = false;
         if (bIo)
         {
             snprintf(result, sizeof(result), "Written $%0*lx at $%06lx (I/O, not read back)", digits, (unsigned long)expected, (unsigned long)address);
@@ -720,9 +693,11 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                     snprintf(result, sizeof(result), "Written $%0*lx at $%06lx but read back $%0*lx (ROM or not writable?)", digits,
                         (unsigned long)expected, (unsigned long)address, digits, (unsigned long)readBack);
                     bResultIsError = true;
+                    bDiffers = true;
                 }
             }
         }
+        marks.Add(address, size, bDiffers);     // Shown until the next stop (cyan, or red if the read-back differs)
 
         // The code words read at PC: re-read them if overlapped (same stop: history, call stack and registers untouched)
         if (pFrame->codeWords > 0 && address < pFrame->pc + (uint32_t)pFrame->codeWords * 2 && address + size > pFrame->pc)
@@ -766,6 +741,189 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
             }
         }
         showMessage(result, bResultIsError);
+        return true;
+    };
+
+    // 'e' (T13): write one byte or word at an address, with read-back. The size is the memory monitor mode unless the
+    // value has a .b / .w suffix. $300000-$3FFFFF (I/O) needs a confirmation. Link errors (timeout...) are only
+    // reported, like a failed monitor read: the debugger stays usable and the 68k is still waiting in its handler.
+    auto handleWriteAction = [&]()
+    {
+        char text[80];
+        bool validated;
+        if (Tui::IsActive())
+        {
+            validated = view.PromptInput("Write (addr value[.b|.w]): ", text, sizeof(text), IdleWhilePrompting);
+        }
+        else
+        {
+            printf("Write: address value[.b|.w], hex ('$' / '0x' optional), address = expression (d0-d7, a0-a7, sp, pc, +/-hex).\n"
+                   "Size = %s unless .b / .w ('w' switches). Enter alone or Esc = cancel.\nwrite> ", memory.words ? "16-bit word" : "8-bit byte");
+            Tui::Flush();
+            validated = Tui::ReadLine(0, 0, 0, text, sizeof(text), IdleWhilePrompting);
+        }
+        if (!validated || text[0] == 0)
+        {
+            return;
+        }
+        char error[160];
+        WriteCommand cmd;
+        if (!ParseWriteCommand(text, &cmd, error, sizeof(error)))
+        {
+            showMessage(error, true);
+            return;
+        }
+        uint32_t address;
+        if (!DebugExpression::Parse(cmd.addressText, pFrame, &address))
+        {
+            snprintf(error, sizeof(error), "Invalid address expression: '%.60s'", cmd.addressText);
+            showMessage(error, true);
+            return;
+        }
+        bool word = cmd.hasSize ? cmd.word : memory.words;
+        if (!word && cmd.value > 0xff)
+        {
+            showMessage("Value too large for a byte (max $FF, use .w for a word)", true);
+            return;
+        }
+        writeUnit(address, cmd.value, word);
+    };
+
+    // T14: edit mode of the memory panel (TUI only). Modal: the keys are interpreted by handleEditAction() only, so no
+    // step / continue / view change / exit while editing (Esc first). The 68k stays in its handler all the time.
+    auto leaveEdit = [&]()
+    {
+        bEdit = false;
+        editCursor.ClearPending();
+        view.SetMemoryEdit(nullptr);
+    };
+
+    // After a resize / redraw: leave the edit mode if the panel is no longer displayed, otherwise keep the cursor visible
+    // (the number of lines may have changed). Call before refreshMemory().
+    auto syncEditLayout = [&]()
+    {
+        if (!bEdit)
+        {
+            return;
+        }
+        int lines = view.GetMemoryLines();
+        if (!Tui::IsActive() || !Tui::IsLargeEnough() || !memory.hasAddress || !view.IsMemoryPanelVisible() || lines <= 0)
+        {
+            leaveEdit();
+            return;
+        }
+        editCursor.EnsureVisible(&memory.address, lines);
+    };
+
+    auto enterEdit = [&]()
+    {
+        editCursor.Reset(memory.address, memory.words);
+        bEdit = true;
+        view.SetMemoryEdit(&editCursor);
+        showMessage("Edit mode: type hex digits, Enter writes, Esc cancels / leaves (a-f are digits)", false);
+    };
+
+    // Redraw after a cursor move: re-read the zone if it scrolled (non shifting refresh, same stop)
+    auto afterCursorMove = [&](bool bZoneChanged)
+    {
+        if (bZoneChanged)
+        {
+            refreshMemory(false);
+        }
+        else
+        {
+            view.RedrawMemory();
+        }
+    };
+
+    auto handleEditAction = [&](Action action, unsigned digit)
+    {
+        int lines = view.GetMemoryLines();
+        switch (action)
+        {
+        case Action::CursorLeft:
+            afterCursorMove(editCursor.MoveCells(-1, &memory.address, lines));
+            break;
+        case Action::CursorRight:
+            afterCursorMove(editCursor.MoveCells(1, &memory.address, lines));
+            break;
+        case Action::LineUp:
+            afterCursorMove(editCursor.MoveLines(-1, &memory.address, lines));
+            break;
+        case Action::LineDown:
+            afterCursorMove(editCursor.MoveLines(1, &memory.address, lines));
+            break;
+        case Action::PageUp:
+            afterCursorMove(editCursor.MovePage(-1, &memory.address, lines));
+            break;
+        case Action::PageDown:
+            afterCursorMove(editCursor.MovePage(1, &memory.address, lines));
+            break;
+        case Action::ToggleWords:
+            memory.words = !memory.words;
+            editCursor.SetWordMode(memory.words);   // Same address (even in word mode), pending value dropped
+            view.SetMemoryWordMode(memory.words);
+            break;
+        case Action::Redraw:
+            view.Redraw();
+            syncEditLayout();
+            refreshMemory(false);
+            break;
+        case Action::Resize:
+            view.Redraw(false);
+            syncEditLayout();
+            refreshMemory(false);
+            break;
+        case Action::EditBackspace:
+            if (editCursor.Backspace())
+            {
+                view.RedrawMemory();
+            }
+            break;
+        case Action::EditEscape:
+            if (editCursor.HasPending())
+            {
+                editCursor.ClearPending();
+                view.RedrawMemory();
+            }
+            else
+            {
+                leaveEdit();
+                showMessage("Edit mode left", false);
+            }
+            break;
+        case Action::EditDigit:
+        case Action::EditEnter:
+        {
+            if (action == Action::EditDigit)
+            {
+                if (!editCursor.AddDigit(digit))
+                {
+                    view.RedrawMemory();
+                    break;
+                }
+            }
+            else if (!editCursor.HasPending())
+            {
+                break;
+            }
+            // Cell complete, or Enter: value right-aligned, zero extended
+            uint32_t address = editCursor.GetAddress();
+            uint32_t value = editCursor.GetPendingValue();
+            editCursor.ClearPending();
+            if (writeUnit(address, value, editCursor.IsWordMode()))
+            {
+                afterCursorMove(editCursor.MoveCells(1, &memory.address, lines));
+            }
+            else
+            {
+                view.RedrawMemory();
+            }
+            break;
+        }
+        default:
+            break;
+        }
     };
 
     // Call stack analysis of the current stop (T10). Done only for what is displayed: the Callers panel (3 to 5 lines),
@@ -998,6 +1156,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         {
             ShowFrameClassic(pFrame);
         }
+        marks.Clear();      // Written by the user "at this stop" only
         refreshMemory(true);
 
         // Wait for a user command
@@ -1011,7 +1170,13 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         {
             ServiceBackgroundTasks(view);
             ensureCallers();    // The layout may have changed (resize, memory monitor)
-            Action action = ReadAction();
+            unsigned editDigit = 0;
+            Action action = ReadAction(bEdit, &editDigit);
+            if (bEdit)
+            {
+                handleEditAction(action, editDigit);
+                continue;
+            }
             switch (action)
             {
             case Action::Step:
@@ -1174,8 +1339,27 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 }
                 break;
             case Action::Write:
-                // T14: when the memory monitor is in edit mode, 'e' will enter / leave it instead (branch here)
-                handleWriteAction();
+                handleWriteAction();    // T13: prompt, always ('e' is a hex digit in the edit mode)
+                break;
+            case Action::EditMode:
+                // T14: edit at the cursor, full screen view with the memory panel displayed
+                if (!Tui::IsActive())
+                {
+                    showMessage("Edit mode is only available in the full screen view ('t')", false);
+                }
+                else if (!memory.hasAddress)
+                {
+                    showMessage("Edit mode needs the memory panel: press 'm' first", false);
+                }
+                else if (!view.IsMemoryPanelVisible() || !Tui::IsLargeEnough())
+                {
+                    showMessage(Tui::IsLargeEnough() ? "Edit mode needs the memory panel: press F3 to show it" :
+                        "Edit mode needs the memory panel: the terminal is too small", false);
+                }
+                else
+                {
+                    enterEdit();
+                }
                 break;
             case Action::Memory:
             case Action::PageUp:
@@ -1191,7 +1375,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
             // Classic view: after an action that stays at the stop and prints something (message, dump, cancelled
             // prompt), remind the keys, otherwise the console ends on an empty line
             // (step out without caller and a cancelled / refused run to also stay at the stop: bWaiting is still true)
-            bool bStaysAndPrints = action == Action::ToggleWords || action == Action::ToggleCode || action == Action::Write ||
+            bool bStaysAndPrints = action == Action::ToggleWords || action == Action::ToggleCode || action == Action::Write || action == Action::EditMode ||
                 action == Action::RunTo || action == Action::StepOut ||
                 action == Action::Memory || action == Action::PageUp || action == Action::PageDown ||
                 action == Action::LineUp || action == Action::LineDown;
@@ -1317,12 +1501,63 @@ void CommandDebug::ServiceBackgroundTasks(DebugTuiView &view)
 }
 
 /// @brief Read a key and translate it into a debugger action. Same keys in both views.
-CommandDebug::Action CommandDebug::ReadAction()
+/// @param bEditMode Memory panel edit mode: only the cursor, hex digits, Enter / Esc / Backspace, 'w' and redraw keys
+/// are active (a-f are digits, so 'c', 'e'... never act as commands); everything else is ignored
+/// @param pDigit Receives the value (0-15) of the hex digit for Action::EditDigit
+CommandDebug::Action CommandDebug::ReadAction(bool bEditMode, unsigned *pDigit)
 {
     Tui::KeyEvent key;
     if (!Tui::ReadKey(&key))
     {
         return Action::None;
+    }
+    if (bEditMode)
+    {
+        switch (key.key)
+        {
+        case Tui::Key::Enter:
+            return Action::EditEnter;
+        case Tui::Key::Escape:
+            return Action::EditEscape;
+        case Tui::Key::Backspace:
+            return Action::EditBackspace;
+        case Tui::Key::Left:
+            return Action::CursorLeft;
+        case Tui::Key::Right:
+            return Action::CursorRight;
+        case Tui::Key::Up:
+            return Action::LineUp;
+        case Tui::Key::Down:
+            return Action::LineDown;
+        case Tui::Key::PageUp:
+            return Action::PageUp;
+        case Tui::Key::PageDown:
+            return Action::PageDown;
+        case Tui::Key::Resize:
+            return Action::Resize;
+        case Tui::Key::Char:
+            if (key.c >= '0' && key.c <= '9')
+            {
+                *pDigit = (unsigned)(key.c - '0');
+                return Action::EditDigit;
+            }
+            if ((key.c >= 'a' && key.c <= 'f') || (key.c >= 'A' && key.c <= 'F'))
+            {
+                *pDigit = (unsigned)((key.c | 0x20) - 'a' + 10);
+                return Action::EditDigit;
+            }
+            if (key.c == 'w' || key.c == 'W')
+            {
+                return Action::ToggleWords;
+            }
+            if (key.c == 'r' || key.c == 'R')
+            {
+                return Action::Redraw;
+            }
+            return Action::None;
+        default:
+            return Action::None;
+        }
     }
     switch (key.key)
     {
@@ -1378,6 +1613,8 @@ CommandDebug::Action CommandDebug::ReadAction()
             return Action::ToggleWords;
         case 'e': case 'E':
             return Action::Write;
+        case 'i': case 'I':
+            return Action::EditMode;
         default:
             return Action::None;
         }

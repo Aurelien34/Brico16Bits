@@ -39,13 +39,13 @@ set(BRICO16BITS_VERSION "dev" CACHE STRING "Firmware version string")
 set (COMMANDS_CPP
     Commands/Command.cpp Commands/CommandBankLoadBank.cpp Commands/CommandBankStoreBank.cpp Commands/CommandSetRomWord.cpp Commands/CommandSendROMPart.cpp Commands/CommandReadWord.cpp Commands/CommandReadWords.cpp Commands/CommandTrace.cpp Commands/CommandFree.cpp Commands/CommandFreq.cpp Commands/CommandClearBuffer.cpp
     Commands/CommandLs.cpp Commands/CommandReset.cpp Commands/CommandDelay.cpp
-    Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandDebug.cpp Commands/CommandComment.cpp Commands/CommandListRoms.cpp Commands/DebugTuiView.cpp Commands/DebugFrame.cpp Commands/DebugLink.cpp Commands/DebugExpression.cpp Commands/MemoryDump.cpp Commands/CallStack.cpp
+    Commands/CommandExtension.cpp Commands/CommandBootSel.cpp Commands/CommandDebug.cpp Commands/CommandComment.cpp Commands/CommandListRoms.cpp Commands/DebugTuiView.cpp Commands/DebugFrame.cpp Commands/DebugLink.cpp Commands/DebugExpression.cpp Commands/MemoryDump.cpp Commands/MemoryCursor.cpp Commands/CallStack.cpp
     )
 
 set (COMMANDS_H
     Commands/Command.h Commands/CommandBankLoadBank.h Commands/CommandBankStoreBank.h Commands/CommandSetRomWord.h Commands/CommandSendROMPart.h Commands/CommandReadWord.h Commands/CommandReadWords.h Commands/CommandTrace.h Commands/CommandFree.h Commands/CommandFreq.h Commands/CommandClearBuffer.h
     Commands/CommandLs.h Commands/CommandReset.h Commands/CommandDelay.h
-    Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandDebug.h Commands/CommandComment.h Commands/CommandListRoms.h Commands/DebugTuiView.h Commands/DebugFrame.h Commands/DebugProtocol.h Commands/DebugLink.h Commands/DebugExpression.h Commands/MemoryDump.h Commands/CallStack.h Commands/InstructionFlow.h
+    Commands/CommandExtension.h Commands/CommandBootSel.h Commands/CommandDebug.h Commands/CommandComment.h Commands/CommandListRoms.h Commands/DebugTuiView.h Commands/DebugFrame.h Commands/DebugProtocol.h Commands/DebugLink.h Commands/DebugExpression.h Commands/MemoryDump.h Commands/MemoryCursor.h Commands/CallStack.h Commands/InstructionFlow.h
     )
 
 set (COMMANDS_68K_CPP

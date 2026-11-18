@@ -31,14 +31,21 @@ private:
         Memory,         // 'm': enter a memory address
         ToggleWords,    // 'w': 16-bit words / bytes
         Write,          // 'e': write memory (prompt)
+        EditMode,       // 'i': edit memory at a cursor (full screen view, memory panel)
         ToggleCode,    // F3: code / memory panel
         PageUp,
         PageDown,
         LineUp,
         LineDown,
+        CursorLeft,     // From here: only returned by ReadAction(bEditMode = true), memory panel edit mode (T14)
+        CursorRight,
+        EditDigit,
+        EditEnter,
+        EditBackspace,
+        EditEscape,
     };
 
-    static Action ReadAction();
+    static Action ReadAction(bool bEditMode = false, unsigned *pDigit = nullptr);
     static void ServiceBackgroundTasks(DebugTuiView &view);
     void ToggleView(DebugTuiView &view, const DebugFrame *pFrame, bool bWaitingForCommand);
     struct WaitContext;

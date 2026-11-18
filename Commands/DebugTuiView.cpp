@@ -35,6 +35,8 @@
 #define COLOR_CODE_TEXT     252
 #define COLOR_CODE_HEX      244
 #define COLOR_MEMORY_ASCII  250
+#define COLOR_MEMORY_PENDING 213    // Value being typed in the memory edit mode
+#define COLOR_MEMORY_WRITTEN 51     // Written by the user at this stop
 #define TARGET_COLUMN       24      // Column of the branch target "($xxxxxx)" in the instruction text field
 #define COLOR_TARGET        179     // Branch target
 #define COLOR_TARGET_HISTORY 95     // Branch target on a history line
@@ -314,6 +316,25 @@ void DebugTuiView::SetMemoryWordMode(bool words)
     }
 }
 
+void DebugTuiView::RedrawMemory()
+{
+    if (Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawMemory();
+        Tui::Flush();
+    }
+}
+
+void DebugTuiView::SetMemoryEdit(const MemoryCursor *cursor)
+{
+    bool changed = (cursor != nullptr) != (mpEditCursor != nullptr);
+    mpEditCursor = cursor;
+    if (changed && Tui::IsActive())
+    {
+        Redraw(false);      // Title and help bar change
+    }
+}
+
 void DebugTuiView::ShowMemory(const MemoryDump *dump, bool hasAddress, uint32_t address, const char *error)
 {
     SetMemoryEnabled(hasAddress);
@@ -461,7 +482,7 @@ void DebugTuiView::DrawStatic()
     }
     if (mbShowMemory)
     {
-        Tui::Box(mnRowMemory, 1, mnHeightMemory, mnScreenWidth, "Memory");
+        Tui::Box(mnRowMemory, 1, mnHeightMemory, mnScreenWidth, mpEditCursor != nullptr ? "Memory [EDIT]" : "Memory");
     }
     if (mnCallerLines > 0)
     {
@@ -837,26 +858,68 @@ void DebugTuiView::DrawMemory()
         uint8_t values[MEMORY_BYTES_PER_LINE];
         uint8_t known[MEMORY_BYTES_PER_LINE];
         uint8_t changed[MEMORY_BYTES_PER_LINE];
+        MemoryWriteMarks::Kind marks[MEMORY_BYTES_PER_LINE];
+        bool inCursor[MEMORY_BYTES_PER_LINE];
         for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
         {
             uint32_t address = lineAddress + i;
             known[i] = mpMemory != nullptr && mpMemory->GetByte(address, &values[i]);
             changed[i] = known[i] && mpMemory->IsByteChanged(address);
+            marks[i] = mpWriteMarks != nullptr ? mpWriteMarks->Lookup(address) : MemoryWriteMarks::Kind::None;
+            inCursor[i] = mpEditCursor != nullptr && mpEditCursor->Contains(address);
         }
+        // Edit mode: the digits typed so far replace the cell under the cursor
+        char pendingText[8] = "";
+        bool hasPending = mpEditCursor != nullptr && mpEditCursor->HasPending();
+        if (hasPending)
+        {
+            mpEditCursor->GetPendingText(pendingText);
+        }
+
+        // Colour of a byte: user written (red if the read-back differed, cyan otherwise) > changed by the program > normal
+        auto byteColor = [&](int i, uint8_t normal) -> uint8_t
+        {
+            if (!known[i])
+            {
+                return COLOR_VALUE_UNKNOWN;
+            }
+            if (marks[i] == MemoryWriteMarks::Kind::Differs)
+            {
+                return COLOR_ERROR;
+            }
+            if (marks[i] == MemoryWriteMarks::Kind::Written)
+            {
+                return COLOR_MEMORY_WRITTEN;
+            }
+            return changed[i] ? COLOR_VALUE_CHANGED : normal;
+        };
 
         for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
         {
-            Tui::SetForeground(!known[i] ? COLOR_VALUE_UNKNOWN : (changed[i] ? COLOR_VALUE_CHANGED : COLOR_VALUE));
-            Tui::SetBold(changed[i]);
-            if (known[i])
+            bool highlighted = changed[i] || marks[i] != MemoryWriteMarks::Kind::None;
+            Tui::SetReverse(inCursor[i]);
+            if (inCursor[i] && hasPending)
             {
-                Tui::Print("%02x", values[i]);
+                int offset = (int)(lineAddress + i - mpEditCursor->GetAddress());
+                Tui::SetForeground(COLOR_MEMORY_PENDING);
+                Tui::SetBold(true);
+                Tui::Print("%c%c", pendingText[offset * 2], pendingText[offset * 2 + 1]);
             }
             else
             {
-                Tui::Print("--");
+                Tui::SetForeground(byteColor(i, COLOR_VALUE));
+                Tui::SetBold(highlighted);
+                if (known[i])
+                {
+                    Tui::Print("%02x", values[i]);
+                }
+                else
+                {
+                    Tui::Print("--");
+                }
             }
             Tui::SetBold(false);
+            Tui::SetReverse(false);
             // 8-bit mode: a space after each byte; 16-bit mode: after each word (each byte keeps its own highlighting)
             if (!mbMemoryWords || (i & 1))
             {
@@ -867,10 +930,12 @@ void DebugTuiView::DrawMemory()
         Tui::Print(" ");
         for (int i = 0; i < MEMORY_BYTES_PER_LINE; ++i)
         {
-            Tui::SetForeground(!known[i] ? COLOR_VALUE_UNKNOWN : (changed[i] ? COLOR_VALUE_CHANGED : COLOR_MEMORY_ASCII));
-            Tui::SetBold(changed[i]);
+            Tui::SetForeground(byteColor(i, COLOR_MEMORY_ASCII));
+            Tui::SetBold(changed[i] || marks[i] != MemoryWriteMarks::Kind::None);
+            Tui::SetReverse(inCursor[i]);
             Tui::Print("%c", (known[i] && values[i] >= 0x20 && values[i] < 0x7f) ? (char)values[i] : '.');
             Tui::SetBold(false);
+            Tui::SetReverse(false);
         }
     }
     Tui::ResetAttributes();
@@ -887,49 +952,110 @@ void DebugTuiView::DrawMessage()
 
 void DebugTuiView::DrawHelp()
 {
+    /// Key of the help bar, with a long and a short form (the bar adapts to the terminal width, see below)
     struct HelpKey
     {
         const char *key;
         const char *label;
-        bool memoryKey;     // Only displayed when the memory monitor is enabled
+        const char *keyShort;       // nullptr: same as key
+        const char *labelShort;     // nullptr: hidden in the short forms
+        bool memoryKey;             // Only displayed when the memory monitor is enabled
+        bool optional;              // Only displayed in the first level (long labels, two spaces), if it fits
     };
     static const HelpKey keysStopped[] =
     {
-        { "s", "Step", false },
-        { "o", "Over", false },
-        { "u", "Out", false },
-        { "c", "Cont", false },
-        { "g", "Go", false },
-        { "m", "Mem", false },
-        { "w", "8/16", true },
-        { "e", "Wr", false },
-        { "Pg", "Scr", true },
-        { "F3", "Pane", true },
-        { "t", "View", false },
-        { "x", "Exit", false },
+        { "s", "Step", nullptr, "Step", false, false },
+        { "o", "Step over", nullptr, "Over", false, false },
+        { "u", "Step out", nullptr, "Out", false, false },
+        { "c", "Continue", nullptr, "Cont", false, false },
+        { "g", "Go to address", nullptr, "Goto", false, false },
+        { "m", "Memory", nullptr, "Mem", false, false },
+        { "w", "8/16-bit", nullptr, "8/16", true, false },
+        { "e", "Write memory", nullptr, "Write", false, false },
+        { "i", "Edit memory", nullptr, "Edit", true, false },
+        { "PgUp/PgDn", "Scroll", "Pg", "Scroll", true, true },
+        { "F3", "Code/Mem", nullptr, "Code/Mem", true, true },
+        { "t", "Switch view", nullptr, "View", false, false },
+        { "x", "Exit", nullptr, "Exit", false, false },
     };
     static const HelpKey keysRunning[] =
     {
-        { "b", "Break", false },
-        { "t", "View", false },
-        { "x", "Exit", false },
+        { "b", "Break", nullptr, "Break", false, false },
+        { "t", "Switch view", nullptr, "View", false, false },
+        { "x", "Exit", nullptr, "Exit", false, false },
     };
-    const HelpKey *keys = meState == State::Running ? keysRunning : keysStopped;
-    unsigned count = meState == State::Running ? sizeof(keysRunning) / sizeof(keysRunning[0]) : sizeof(keysStopped) / sizeof(keysStopped[0]);
-
-    // Visible keys, and the width of the bar with two spaces between keys: one space if it does not fit
-    bool visible[sizeof(keysStopped) / sizeof(keysStopped[0])];
-    int width = 1;
-    for (unsigned i = 0; i < count; ++i)
+    static const HelpKey keysEdit[] =
     {
-        bool isF3 = strcmp(keys[i].key, "F3") == 0;
-        visible[i] = !(keys[i].memoryKey && !mbHasMemoryAddress) && !(isF3 && mbBothPanels);   // F3: nothing to toggle with both panels
-        if (visible[i])
+        { "0-9 a-f", "Hex value", "0-9a-f", "Value", false, false },
+        { "Enter", "Write", nullptr, "Write", false, false },
+        { "Backspace", "Erase digit", nullptr, nullptr, false, false },
+        { "Arrows", "Move", nullptr, "Move", false, false },
+        { "PgUp/PgDn", "Page", "Pg", "Page", false, false },
+        { "w", "8/16-bit", nullptr, "8/16", false, false },
+        { "Esc", "Cancel / Leave edit", nullptr, "Cancel/Quit", false, false },
+    };
+    const HelpKey *keys = keysStopped;
+    unsigned count = sizeof(keysStopped) / sizeof(keysStopped[0]);
+    if (meState == State::Running)
+    {
+        keys = keysRunning;
+        count = sizeof(keysRunning) / sizeof(keysRunning[0]);
+    }
+    else if (mpEditCursor != nullptr)
+    {
+        keys = keysEdit;
+        count = sizeof(keysEdit) / sizeof(keysEdit[0]);
+    }
+
+    // Levels tried in order, the first one that fits is used: long labels + 2 spaces (with the optional keys), long labels
+    // + 2 spaces, long + 1 space, short labels + 2 spaces, short + 1 space. If nothing fits, the last level is truncated.
+    struct Level
+    {
+        bool shortForm;
+        int separator;
+        bool optional;
+    };
+    static const Level levels[] = { { false, 2, true }, { false, 2, false }, { false, 1, false }, { true, 2, false }, { true, 1, false } };
+    const int levelCount = (int)(sizeof(levels) / sizeof(levels[0]));
+    const int available = (int)mnScreenWidth - 1;   // The text starts at column 2; the last cell of the line is never written
+    int chosen = levelCount - 1;
+    const HelpKey *visibleKeys[16];
+    const char *visibleKeyText[16];
+    const char *visibleLabel[16];
+    int visibleCount = 0;
+    for (int level = 0; level < levelCount; ++level)
+    {
+        const Level &lv = levels[level];
+        visibleCount = 0;
+        int width = 1;
+        for (unsigned i = 0; i < count && visibleCount < 16; ++i)
         {
-            width += (int)strlen(keys[i].key) + 1 + (int)strlen(keys[i].label) + 2;
+            const HelpKey &k = keys[i];
+            bool isF3 = strcmp(k.key, "F3") == 0;
+            if ((k.memoryKey && !mbHasMemoryAddress) || (isF3 && mbBothPanels) || (k.optional && !lv.optional))
+            {
+                continue;
+            }
+            const char *label = lv.shortForm ? k.labelShort : k.label;
+            if (label == nullptr)
+            {
+                continue;
+            }
+            visibleKeys[visibleCount] = &k;
+            visibleKeyText[visibleCount] = (lv.shortForm && k.keyShort != nullptr) ? k.keyShort : k.key;
+            visibleLabel[visibleCount] = label;
+            width += (int)strlen(visibleKeyText[visibleCount]) + 1 + (int)strlen(label) + lv.separator;
+            ++visibleCount;
+        }
+        // The trailing separator is not displayed: it does not need room
+        if (width - lv.separator <= available || level == levelCount - 1)
+        {
+            chosen = level;
+            break;
         }
     }
-    const char *separator = width <= (int)mnScreenWidth - 2 ? "  " : " ";
+    const int separatorWidth = levels[chosen].separator;
+    const char *separator = separatorWidth == 2 ? "  " : " ";
 
     Tui::SetColors(COLOR_BAR_FG, COLOR_BAR_BG);
     // Last line of the screen: writing its last cell may scroll some terminals. Fill that cell with "erase to end
@@ -937,18 +1063,22 @@ void DebugTuiView::DrawHelp()
     Tui::FillLine(mnRowHelp, 1, mnScreenWidth - 1);
     Tui::ClearToEndOfLine();
     Tui::MoveTo(mnRowHelp, 2);
-    for (unsigned i = 0; i < count; ++i)
+    int column = 1;     // Cells used so far (the bar starts with one blank cell)
+    for (int i = 0; i < visibleCount; ++i)
     {
-        if (!visible[i])
+        int keyWidth = (int)strlen(visibleKeyText[i]);
+        int labelWidth = (int)strlen(visibleLabel[i]);
+        if (column + keyWidth + 1 + labelWidth > available)
         {
-            continue;
+            break;      // Last resort: truncated at a key boundary
         }
         Tui::SetForeground(COLOR_BAR_KEY);
         Tui::SetBold(true);
-        Tui::Print("%s", keys[i].key);
+        Tui::Print("%s", visibleKeyText[i]);
         Tui::SetBold(false);
         Tui::SetForeground(COLOR_BAR_FG);
-        Tui::Print(" %s%s", keys[i].label, separator);
+        Tui::Print(" %s%s", visibleLabel[i], separator);
+        column += keyWidth + 1 + labelWidth + separatorWidth;
     }
     Tui::ResetAttributes();
 }
