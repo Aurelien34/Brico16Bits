@@ -258,7 +258,10 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
     printf("Waiting for debug frame from remote. Press 'x' to exit at any time, 't' to switch to the %s view...\n", bTuiMode ? "classic" : "full screen");
 
     MemoryState memory;
+    mHistory.Clear();
+    bool bLastCommandWasStep = false;   // The next stop follows a STEP: the instruction just left was executed
     DebugTuiView view;
+    view.SetHistory(&mHistory);
     view.SetMemoryWordMode(memory.words);
     view.ShowMemory(&memory.dump, false, 0, nullptr);
     if (bTuiMode)
@@ -420,6 +423,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         DebugStop stop;
         if (!link.WaitStop(&stop, PollWaiting, &waitContext))
         {
+            mHistory.Clear();
             view.Leave();
             snprintf(returnMessage, messageMaxSize, "User interrupted debug frame download");
             InputBuffer::Clear(true);
@@ -430,6 +434,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         DebugRegisters regs;
         if (!link.GetRegisters(&regs))
         {
+            mHistory.Clear();
             ReportLinkError(view, returnMessage, messageMaxSize, "Unable to read the registers", link);
             return false;
         }
@@ -447,6 +452,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         {
             if (link.GetLastError() != DebugLinkError::InvalidArgument)
             {
+                mHistory.Clear();
                 ReportLinkError(view, returnMessage, messageMaxSize, "Unable to read the code at PC", link);
                 return false;
             }
@@ -454,6 +460,22 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
             memset(pFrame->code, 0, sizeof(pFrame->code));
         }
         ++nStepCount;
+
+        // History: after a STEP, the instruction executed is the first one of the previous stop (same words and text,
+        // no extra memory read). After anything else (first stop, continue) there is no history.
+        if (!bLastCommandWasStep || pPreviousFrame == nullptr)
+        {
+            mHistory.Clear();
+        }
+        else
+        {
+            // Static: too large for the stack
+            static DisassembledInstruction executed;
+            if (DisassembleFrame(pPreviousFrame, &executed, 1) == 1)
+            {
+                mHistory.Push(executed, pPreviousFrame->a[7]);
+            }
+        }
 
         // Display the frame. The full screen view always keeps track of it (it only draws when active),
         // so that switching views at any time shows the current frame
@@ -558,6 +580,13 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         pPreviousFrame = pFrame;
         pFrame = (pFrame == &frames[0]) ? &frames[1] : &frames[0];
         view.SetState(debugCommand == DebugCommand::Continue ? DebugTuiView::State::Running : DebugTuiView::State::Waiting);
+
+        // After CONTINUE the next stop is a break: no history. After a STEP, the history is kept until the next stop.
+        bLastCommandWasStep = debugCommand == DebugCommand::Step;
+        if (!bLastCommandWasStep)
+        {
+            mHistory.Clear();
+        }
 
         // Send the command to the 68k
         link.Resume(debugCommand);
@@ -776,28 +805,46 @@ void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
     printf("|\n");
     DisassembledInstruction instructions[CONSOLE_INSTRUCTIONS_COUNT];
     int count = DisassembleFrame(frame, instructions, CONSOLE_INSTRUCTIONS_COUNT);
+    // Executed instructions before the current one (contiguous lines, or a single "from" line after a flow break)
+    HistoryRow historyRows[ExecutionHistory::MAX_ROWS];
+    int historyCount = mHistory.BuildRows(frame->pc, historyRows);
+    for (int i = 0; i < historyCount; ++i)
+    {
+        PrintInstructionClassic(&historyRows[i].pInstruction->instruction, historyRows[i].isFromLine ? "| <- " : "|    ");
+    }
     for (int i = 0; i < count; ++i)
     {
-        const DisassembledInstruction *instruction = &instructions[i];
-        const char *text = instruction->truncated ? "..." : instruction->text;
-        printf(i == 0 ? "| -> ": "|    ");
-        printf("%07lx: ", (unsigned long)instruction->address);
-        printf("%s ", text);
-        RepeatChars(' ', CONSOLE_MAX_INSTRUCTIONS_LENGTH - strlen(text));
-        printf("| ");
-
-        for (int w = 0; w < instruction->wordCount; ++w)
-        {
-            printf("%04x ", instruction->words[w]);
-        }
-
-        RepeatChars(' ', CONSOLE_MAX_ROW_LENGTH - CONSOLE_MAX_INSTRUCTIONS_LENGTH - 18 - instruction->wordCount * 5);
-
-        printf("|\n");
+        PrintInstructionClassic(&instructions[i], i == 0 ? "| -> " : "|    ");
     }
 
     ShowSplitter();
     printf("\n's' or space to step, 'c' to continue, 'm' for a memory dump (PgUp/PgDn to scroll, 'w' for 8/16-bit), 't' for the full screen view, 'x' to exit\n");
+}
+
+void CommandDebug::PrintInstructionClassic(const DisassembledInstruction *instruction, const char *prefix)
+{
+    // The branch target "($xxxxxx)" is appended to the text only if it fits in the text field, otherwise omitted
+    char buffer[DEBUG_INSTRUCTION_MAX_TEXT + 16];
+    const char *text = instruction->truncated ? "..." : instruction->text;
+    if (instruction->hasTarget && strlen(text) + 10 <= CONSOLE_MAX_INSTRUCTIONS_LENGTH)
+    {
+        snprintf(buffer, sizeof(buffer), "%s ($%06lx)", text, (unsigned long)(instruction->target & 0xffffff));
+        text = buffer;
+    }
+    printf("%s", prefix);
+    printf("%07lx: ", (unsigned long)instruction->address);
+    printf("%s ", text);
+    RepeatChars(' ', CONSOLE_MAX_INSTRUCTIONS_LENGTH - strlen(text));
+    printf("| ");
+
+    for (int w = 0; w < instruction->wordCount; ++w)
+    {
+        printf("%04x ", instruction->words[w]);
+    }
+
+    RepeatChars(' ', CONSOLE_MAX_ROW_LENGTH - CONSOLE_MAX_INSTRUCTIONS_LENGTH - 18 - instruction->wordCount * 5);
+
+    printf("|\n");
 }
 
 void CommandDebug::ShowSplitter()

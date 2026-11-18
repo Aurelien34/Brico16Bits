@@ -35,6 +35,12 @@ int DisassembleFrame(const DebugFrame *frame, DisassembledInstruction *instructi
         {
             instruction->words[instruction->wordCount++] = code[w];
         }
+        instruction->hasTarget = !instruction->truncated && strcmp(instruction->text, "Unknown") != 0 &&
+            GetBranchTarget(instruction->address, instruction->words, instruction->wordCount, &instruction->target);
+        if (!instruction->hasTarget)
+        {
+            instruction->target = 0;
+        }
         address += (position - start) << 1;
     }
     return count;

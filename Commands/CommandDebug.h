@@ -39,6 +39,12 @@ private:
     static bool PollWaiting(void *context);
     static void ReportLinkError(DebugTuiView &view, char *returnMessage, int messageMaxSize, const char *what, const DebugLink &link);
     void ShowFrameClassic(const DebugFrame *frame);
+    /// @brief Classic view: one line of the Program box ("| -> " / "|    " prefix, address, text, words)
+    void PrintInstructionClassic(const DisassembledInstruction *instruction, const char *prefix);
+
+    /// @brief Instructions executed before the current stop (see ExecutionHistory). Cleared at the start of Dbg, after
+    /// CONTINUE and on any DebugLink error. T8 / T10: GetPrevious() gives the previous PC, SP (effective a7) and size.
+    ExecutionHistory mHistory;
     void ShowSplitter();
     void RepeatChars(char c, int16_t count);
 };

@@ -5,6 +5,60 @@
 #include "DebugFrame.h"
 #include "MemoryDump.h"
 
+/// @brief An instruction that was really executed (first instruction of a previous stop), kept with the context
+/// needed to display it and to feed the call stack analysis (T8 / T10)
+struct ExecutedInstruction
+{
+    DisassembledInstruction instruction;    ///< PC, text and words as disassembled at the stop where it was about to run
+    uint32_t sp;                            ///< Effective a7 at that stop (before the instruction ran)
+    bool forceBreak;                        ///< The flow is considered broken after it, even if the next PC is contiguous
+
+    /// @brief Size in bytes (wordCount * 2). Only meaningful if IsSizeReliable().
+    uint32_t GetSizeBytes() const { return (uint32_t)instruction.wordCount * 2; }
+    /// @brief false if the instruction was not decoded ("Unknown") or truncated: its size cannot be trusted
+    bool IsSizeReliable() const;
+    /// @brief true if the instruction at nextPc follows it directly (reliable size, no forced break)
+    bool IsContiguousTo(uint32_t nextPc) const;
+};
+
+/// @brief One line shown above the current instruction
+struct HistoryRow
+{
+    const ExecutedInstruction *pInstruction;
+    bool isFromLine;    ///< true: the flow was broken, the line says where we come from ("<- addr"); false: contiguous
+};
+
+/// @brief The last executed instructions (oldest first), at most MAX_ENTRIES. Cleared whenever the next stop cannot be
+/// the direct consequence of a step (start of Dbg, continue, link error).
+class ExecutionHistory
+{
+public:
+    static const int MAX_ENTRIES = 2;
+    static const int MAX_ROWS = MAX_ENTRIES;
+
+    void Clear() { mnCount = 0; }
+    /// @brief Record an executed instruction (the most recent one). The oldest is dropped when full.
+    /// @param sp Effective a7 when it was about to run
+    /// @param forceBreak true to display it as a "from" line even if the next PC is contiguous (T8: step over)
+    void Push(const DisassembledInstruction &instruction, uint32_t sp, bool forceBreak = false);
+    int GetCount() const { return mnCount; }
+    /// @brief Entry by age: 0 = oldest, GetCount() - 1 = most recent (the instruction executed just before the current stop)
+    const ExecutedInstruction &Get(int index) const { return maEntries[index]; }
+    /// @brief The most recent entry (previous PC, previous SP, size), nullptr if empty
+    const ExecutedInstruction *GetPrevious() const { return mnCount > 0 ? &maEntries[mnCount - 1] : nullptr; }
+    /// @brief Lines to display above the instruction at currentPc (oldest first):
+    /// - most recent entry contiguous with currentPc: it is shown as a normal line, preceded by the older entry if that
+    ///   one is contiguous with it too (an older entry that is not contiguous is dropped, no marker);
+    /// - flow break (or unreliable size, or forceBreak): only the most recent entry, as a "from" line.
+    /// @param rows Array of MAX_ROWS rows
+    /// @return Number of rows written
+    int BuildRows(uint32_t currentPc, HistoryRow *rows) const;
+
+private:
+    ExecutedInstruction maEntries[MAX_ENTRIES];
+    int mnCount = 0;
+};
+
 /// @brief Full screen (TUI) display of the 68000 debugger
 class DebugTuiView
 {
@@ -21,6 +75,9 @@ public:
     void Redraw(bool querySize = true);
     void ShowFrame(const DebugFrame *frame, const DebugFrame *previousFrame, uint32_t stepCount);
     void SetState(State state);
+    /// @brief History displayed above the current instruction in the Program panel (nullptr: none). Must stay valid;
+    /// set before ShowFrame().
+    void SetHistory(const ExecutionHistory *history) { mpHistory = history; }
     void SetMessage(const char *message, bool isError = false);
     void PollAsyncMessages();
     /// @brief Prompt in the message line and read a line (see Tui::ReadLine). Message line cleared afterwards.
@@ -61,6 +118,7 @@ private:
 
     const DebugFrame *mpFrame = nullptr;
     const DebugFrame *mpPreviousFrame = nullptr;
+    const ExecutionHistory *mpHistory = nullptr;
     uint32_t mnStepCount = 0;
     State meState = State::Waiting;
     char mszMessage[160] = "";

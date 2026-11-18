@@ -322,6 +322,15 @@ bascule F3 ; dump d'une adresse cartouche.
   précédents pour `CallStack::OnStep`).
 - Fichiers : `CommandDebug.*`, `DebugTuiView.*`.
 
+- **Révision après test matériel** (demande de l'utilisateur) :
+  - L'affichage avec marqueur `...` était trompeur (lu comme des adresses consécutives). Après
+    une rupture de flot, on n'affiche plus que l'instruction qui a fait sauter, sur une ligne
+    distincte : `<- from c007a8  beq -30`. L'historique sur 2 lignes reste réservé à
+    l'enchaînement continu. Plus de marqueur `...`.
+  - Sauts relatifs (Bcc, BRA, BSR, DBcc, JMP/JSR d16(PC)) : l'adresse de destination est affichée
+    entre parenthèses, plus loin sur la ligne, dans une autre couleur en TUI (`($c0078c)`).
+    Calculée dans `DebugFrame` (fonction pure testée sur hôte), pas dans `OpcodeDecoder`.
+
 #### G2c — Validation matérielle (peut être regroupée avec G3)
 Pas à pas dans du code linéaire : les 2 instructions précédentes s'affichent au-dessus, sans
 marqueur ; pas à pas sur un `bra`/`jsr`/`rts` : marqueur de rupture ; après `c` puis arrêt :

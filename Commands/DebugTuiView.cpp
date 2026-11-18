@@ -32,6 +32,11 @@
 #define COLOR_CODE_TEXT     252
 #define COLOR_CODE_HEX      244
 #define COLOR_MEMORY_ASCII  250
+#define TARGET_COLUMN       24      // Column of the branch target "($xxxxxx)" in the instruction text field
+#define COLOR_TARGET        179     // Branch target
+#define COLOR_TARGET_HISTORY 95     // Branch target on a history line
+#define COLOR_HISTORY       242     // Executed instructions above the current one (dimmed)
+#define HISTORY_MIN_LISTING 3       // Lines of the listing (current instruction included) kept when history takes lines
 #define COLOR_CURRENT_BG    237
 #define COLOR_CURRENT_ARROW 46
 #define COLOR_MESSAGE       214
@@ -39,6 +44,97 @@
 #define COLOR_STATE_WAITING 130
 #define COLOR_STATE_STOPPED 124
 #define COLOR_STATE_RUNNING 28
+
+bool ExecutedInstruction::IsSizeReliable() const
+{
+    return !instruction.truncated && instruction.wordCount > 0 && strcmp(instruction.text, "Unknown") != 0;
+}
+
+bool ExecutedInstruction::IsContiguousTo(uint32_t nextPc) const
+{
+    if (forceBreak || !IsSizeReliable())
+    {
+        return false;
+    }
+    return ((instruction.address + GetSizeBytes()) & 0xffffff) == (nextPc & 0xffffff);
+}
+
+void ExecutionHistory::Push(const DisassembledInstruction &instruction, uint32_t sp, bool forceBreak)
+{
+    if (mnCount == MAX_ENTRIES)
+    {
+        for (int i = 1; i < MAX_ENTRIES; ++i)
+        {
+            maEntries[i - 1] = maEntries[i];
+        }
+        --mnCount;
+    }
+    ExecutedInstruction &entry = maEntries[mnCount++];
+    entry.instruction = instruction;
+    entry.sp = sp;
+    entry.forceBreak = forceBreak;
+}
+
+int ExecutionHistory::BuildRows(uint32_t currentPc, HistoryRow *rows) const
+{
+    if (mnCount == 0)
+    {
+        return 0;
+    }
+    const ExecutedInstruction &latest = maEntries[mnCount - 1];
+    if (!latest.IsContiguousTo(currentPc))
+    {
+        // Flow break: only say where we come from, the older entries are not at the addresses above the listing
+        rows[0].pInstruction = &latest;
+        rows[0].isFromLine = true;
+        return 1;
+    }
+    int count = 0;
+    if (mnCount == 2 && maEntries[0].IsContiguousTo(latest.instruction.address))
+    {
+        rows[count].pInstruction = &maEntries[0];
+        rows[count++].isFromLine = false;
+    }
+    rows[count].pInstruction = &latest;
+    rows[count++].isFromLine = false;
+    return count;
+}
+
+/// @brief Print the instruction text then, if it is a relative branch, its absolute target "($xxxxxx)" at a fixed
+/// column of the text field (right after the text if that one is longer), truncated to the field width.
+/// The text field is padded to textWidth. Colors are set here; the caller restores its own afterwards.
+static void PrintTextAndTarget(const DisassembledInstruction *instruction, int textWidth, uint8_t textColor, uint8_t targetColor, bool bold)
+{
+    const char *text = instruction->truncated ? "..." : instruction->text;
+    int length = (int)strlen(text);
+    if (length > textWidth)
+    {
+        length = textWidth;
+    }
+    Tui::SetForeground(textColor);
+    Tui::SetBold(bold);
+    Tui::Print("%.*s", length, text);
+    Tui::SetBold(false);
+    int position = length;
+    if (instruction->hasTarget)
+    {
+        int column = length + 1 > TARGET_COLUMN ? length + 1 : TARGET_COLUMN;
+        int room = textWidth - column;
+        if (room > 0)
+        {
+            char target[12];
+            snprintf(target, sizeof(target), "($%06lx)", (unsigned long)(instruction->target & 0xffffff));
+            Tui::RepeatChar(' ', column - position);
+            Tui::SetForeground(targetColor);
+            Tui::Print("%.*s", room, target);
+            position = column + (room < 9 ? room : 9);
+        }
+    }
+    if (position < textWidth)
+    {
+        Tui::RepeatChar(' ', textWidth - position);
+    }
+}
 
 void DebugTuiView::Enter()
 {
@@ -462,14 +558,37 @@ void DebugTuiView::DrawCode()
         textWidth = DEBUG_INSTRUCTION_MAX_TEXT - 1;
     }
 
+    // History lines (executed instructions, or a "from" line) are drawn above the current instruction and take
+    // lines from the end of the listing. The oldest ones are dropped first, keeping HISTORY_MIN_LISTING lines.
+    HistoryRow historyRows[ExecutionHistory::MAX_ROWS];
+    int historyCount = 0;
+    const HistoryRow *pHistory = historyRows;
+    if (mpHistory != nullptr && mpFrame != nullptr)
+    {
+        historyCount = mpHistory->BuildRows(mpFrame->pc, historyRows);
+        int maxHistory = mnCodeLines - HISTORY_MIN_LISTING;
+        if (maxHistory < 0)
+        {
+            maxHistory = 0;
+        }
+        if (historyCount > maxHistory)
+        {
+            int skip = historyCount - maxHistory;
+            pHistory += skip;
+            historyCount -= skip;
+        }
+    }
+
     // Static: too large for the stack
     static DisassembledInstruction instructions[CODE_MAX_LINES];
-    int count = mpFrame != nullptr ? DisassembleFrame(mpFrame, instructions, mnCodeLines) : 0;
+    int count = mpFrame != nullptr ? DisassembleFrame(mpFrame, instructions, mnCodeLines - historyCount) : 0;
 
     for (int line = 0; line < mnCodeLines; ++line)
     {
         uint16_t row = mnRowCode + 1 + line;
-        bool current = line == 0;
+        bool isHistory = line < historyCount;
+        int index = line - historyCount;    // Index in the listing
+        bool current = index == 0;
 
         Tui::ResetAttributes();
         if (current)
@@ -478,11 +597,27 @@ void DebugTuiView::DrawCode()
         }
         Tui::FillLine(row, 2, innerWidth);
 
-        if (line >= count)
+        if (isHistory)
+        {
+            Tui::MoveTo(row, 3);
+            Tui::SetForeground(COLOR_HISTORY);
+            const HistoryRow &historyRow = pHistory[line];
+            const DisassembledInstruction *past = &historyRow.pInstruction->instruction;
+            Tui::Print("%s", historyRow.isFromLine ? "<- " : "   ");
+            Tui::Print("%06lx  ", (unsigned long)(past->address & 0xffffff));
+            PrintTextAndTarget(past, textWidth, COLOR_HISTORY, COLOR_TARGET_HISTORY, false);
+            Tui::SetForeground(COLOR_HISTORY);
+            for (int w = 0; w < past->wordCount; ++w)
+            {
+                Tui::Print(" %04x", past->words[w]);
+            }
+            continue;
+        }
+        if (index >= count)
         {
             continue;
         }
-        const DisassembledInstruction *instruction = &instructions[line];
+        const DisassembledInstruction *instruction = &instructions[index];
 
         Tui::MoveTo(row, 3);
         Tui::SetForeground(COLOR_CURRENT_ARROW);
@@ -491,10 +626,7 @@ void DebugTuiView::DrawCode()
         Tui::SetBold(false);
         Tui::SetForeground(COLOR_CODE_ADDRESS);
         Tui::Print(" %06lx  ", (unsigned long)(instruction->address & 0xffffff));
-        Tui::SetForeground(COLOR_CODE_TEXT);
-        Tui::SetBold(current);
-        Tui::Print("%-*.*s", textWidth, textWidth, instruction->truncated ? "..." : instruction->text);
-        Tui::SetBold(false);
+        PrintTextAndTarget(instruction, textWidth, COLOR_CODE_TEXT, COLOR_TARGET, current);
         Tui::SetForeground(COLOR_CODE_HEX);
         for (int w = 0; w < instruction->wordCount; ++w)
         {
