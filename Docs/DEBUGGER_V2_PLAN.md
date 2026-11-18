@@ -1,3 +1,5 @@
+> **Document historique** : plan d'exécution du debugger 68000 v2, conservé pour les sections « Pistes futures » et « Défauts connus hors plan ». La documentation de référence est `Brico16Bits/README.md` et la section 6 de `Brico68k/HARDWARE_NOTES.md` (protocole v2).
+
 # Debugger 68000 v2 — plan d'exécution par agents
 
 Ce document est la référence unique pour toutes les tâches. Chaque agent lit d'abord
