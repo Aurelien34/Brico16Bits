@@ -10,6 +10,25 @@
 #define READ_MEM_FORBIDDEN_START 0x300000u
 #define READ_MEM_FORBIDDEN_END   0x3FFFFFu
 
+/// @brief Highest address of the 68000 (24 bits address bus)
+#define M68K_ADDRESS_MAX 0xFFFFFFu
+
+/// @brief Bytes of the handler's stack below SSP_INTERRUPTED while it waits for a request:
+/// exception frame (SR + PC = 6 bytes) and d0-d7/a0-a6 saved by the movem of Trace.s (15 * 4 bytes)
+#define HANDLER_STACK_BYTES (6u + 15u * 4u)
+
+/// @brief True if the word containing address is a BricoExt port (EOT / port out) or one of their
+/// mirrors in $C00000-$CFFFFF: the watcher only compares A1-A16
+static bool IsBricoExtPort(uint64_t address)
+{
+    if (address < 0xC00000u || address > 0xCFFFFFu)
+    {
+        return false;
+    }
+    uint32_t low = (uint32_t)address & 0x1FFFEu;
+    return low == 0x1FF00u || low == 0x1FF02u;
+}
+
 /// @brief Store a 16 bits value in the mailbox. The image is read by the 68k as big-endian words;
 /// the former byte-wise convention (low byte at the even offset) is a native little-endian 16 bits store.
 static inline void WriteMailboxWord(uint32_t offset, uint16_t value)
@@ -26,7 +45,8 @@ static inline void WriteMailboxLong(uint32_t offset, uint32_t value)
 
 DebugLink::DebugLink()
     : mnCounter(0), mbCounterValid(false), mnResponseTimeoutMs(DEFAULT_RESPONSE_TIMEOUT_MS),
-      meLastError(DebugLinkError::None), mnUnrecognizedFrames(0), mnLastUnrecognizedWords(0), mnLastExtraWords(0)
+      meLastError(DebugLinkError::None), mnUnrecognizedFrames(0), mnLastUnrecognizedWords(0), mnLastExtraWords(0),
+      mnStopSsp(0), mbStopSspValid(false)
 {
 }
 
@@ -68,6 +88,7 @@ bool DebugLink::WaitStop(DebugStop *stop, PollCallback poll, void *context)
 {
     meLastError = DebugLinkError::None;
     mbCounterValid = false;
+    mbStopSspValid = false;
 
     // Sliding window of the last DEBUG_STOP_FRAME_WORDS words. It persists across EOTs (a stray EOT
     // may split the real frame in two) and is cleared only when a frame is accepted.
@@ -226,6 +247,8 @@ bool DebugLink::GetRegisters(DebugRegisters *regs)
     regs->usp = toLong(32);
     regs->sr = raw[34];
     regs->pc = toLong(35);
+    mnStopSsp = regs->ssp;
+    mbStopSspValid = true;
     return true;
 }
 
@@ -250,14 +273,10 @@ bool DebugLink::ReadMemory(uint32_t address, uint16_t words, uint16_t *buffer, b
         // $C00000-$CFFFFF) trigger an EOT / a port capture when read
         for (uint64_t a = address; a <= last; a += 2)
         {
-            if (a >= 0xC00000u && a <= 0xCFFFFFu)
+            if (IsBricoExtPort(a))
             {
-                uint32_t low = (uint32_t)a & 0x1FFFEu;
-                if (low == 0x1FF00u || low == 0x1FF02u)
-                {
-                    meLastError = DebugLinkError::InvalidArgument;
-                    return false;
-                }
+                meLastError = DebugLinkError::InvalidArgument;
+                return false;
             }
         }
     }
@@ -267,6 +286,41 @@ bool DebugLink::ReadMemory(uint32_t address, uint16_t words, uint16_t *buffer, b
     }
     SendRequest(DebugCommand::ReadMem, address, words);
     return ReadResponse(buffer, words);
+}
+
+bool DebugLink::WriteMemory(uint32_t address, uint16_t value, bool word, bool force)
+{
+    meLastError = DebugLinkError::None;
+    uint32_t last = address + (word ? 1u : 0u);
+    if (address > M68K_ADDRESS_MAX || (word && (address & 1)) || IsBricoExtPort(address) ||
+        (!force && address <= READ_MEM_FORBIDDEN_END && last >= READ_MEM_FORBIDDEN_START))
+    {
+        meLastError = DebugLinkError::InvalidArgument;
+        return false;
+    }
+    if (!BeginRequest())
+    {
+        return false;
+    }
+    if (!mbStopSspValid)
+    {
+        DebugRegisters regs;
+        if (!GetRegisters(&regs))
+        {
+            return false;
+        }
+    }
+    // Handler's stack: [SSP - HANDLER_STACK_BYTES, SSP), in the 24 bits address space
+    int64_t stackEnd = (int64_t)(mnStopSsp & M68K_ADDRESS_MAX);
+    int64_t stackStart = stackEnd - (int64_t)HANDLER_STACK_BYTES;
+    if ((int64_t)last >= stackStart && (int64_t)address < stackEnd)
+    {
+        meLastError = DebugLinkError::InvalidArgument;
+        return false;
+    }
+    SendRequest(DebugCommand::WriteMem, address, (uint32_t)value | (word ? DEBUG_WRITE_MEM_WORD : 0u));
+    // Answer: EOT only
+    return ReadResponse(nullptr, 0);
 }
 
 void DebugLink::Resume(DebugCommand cmd, uint32_t arg0, uint32_t arg1)
@@ -283,6 +337,7 @@ void DebugLink::Resume(DebugCommand cmd, uint32_t arg0, uint32_t arg1)
     SendRequest(cmd, arg0, arg1);
     // The 68k leaves the handler: a new WaitStop is needed before any other request
     mbCounterValid = false;
+    mbStopSspValid = false;
 }
 
 void DebugLink::RequestBreak()

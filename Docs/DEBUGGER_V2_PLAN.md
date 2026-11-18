@@ -424,6 +424,51 @@ Callers corrects dans Brico68k (asm, sans `LINK`) et dans un jeu ; step out.
 - `Brico68k/HARDWARE_NOTES.md` : section « Protocole debugger v2 », qui reprend la spécification
   ci-dessus.
 - Supprimer ce fichier de plan, ou le déplacer dans `Docs/`, selon la décision de l'utilisateur.
+- **Réalisé** : plan déplacé dans `Docs/`.
+
+### Phase 6 — Écriture mémoire (ajoutée après la v2)
+
+Décisions de l'utilisateur : pas d'écriture directe dans l'image ROM système du Pico ; écriture
+en `$300000-$3FFFFF` autorisée après confirmation ; touche `e` pour le mode édition ; taille du
+handler à mesurer d'abord (T12) avant de choisir entre agrandir la zone patchée ou réserver
+l'écriture au mode B.
+
+#### T12 — Commande `WRITE_MEM` · **Opus** · dépendances : aucune
+- Nouvelle commande `DEBUG_CMD_WRITE_MEM` (= 5) : ARG0 = adresse, ARG1 = valeur dans les bits
+  0-15 ; bit 31 de ARG1 = taille (0 = octet, `move.b` ; 1 = mot, `move.w`). Le handler écrit,
+  envoie EOT et reste dans la boucle de commandes (comme `READ_MEM`). Un mot à adresse impaire
+  ne doit jamais atteindre le 68k (erreur d'adresse) : contrôlé côté Pico.
+- Fichiers : `Brico68k/Trace.s`, `Brico68k/inc/trace.inc`, `Brico16Bits/Commands/DebugProtocol.h`,
+  `Brico16Bits/Commands/DebugLink.h/.cpp`, `Brico16Bits/Commands/TraceRoutine.h` (copie manuelle de
+  `build/TraceRoutine.h`).
+- `DebugLink::WriteMemory(address, value, bool word, bool force)` : refuse mot impair, ports
+  BricoExt (y compris miroirs), `$300000-$3FFFFF` sans `force`, et la trame d'exception
+  `[SSP, SSP+6)` (SR et PC empilés ; SSP fourni par l'appelant ou mémorisé au dernier
+  `GetRegisters`). Attend l'EOT comme les autres requêtes.
+- Taille : `TRACE_ROUTINE_SIZE_BYTES` doit rester ≤ `BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES` (`$100`) ;
+  handler actuel : 230 octets. Optimiser si besoin sans changer le comportement ; si ça ne tient
+  pas, s'arrêter et rendre compte (l'utilisateur choisira).
+- Critères : les deux projets compilent ; taille indiquée ; analyse de conservation des registres.
+
+#### T13 — Écriture par invite · Sonnet · dépendances : T12 validé (G5a)
+- Touche `e` hors mode édition du moniteur (vue classique, ou TUI sans moniteur affiché) :
+  invite `Write: <adresse> <valeur>` ; adresse = expression `DebugExpression` ; taille = mode `w`
+  du moniteur, suffixe `.b` / `.w` pour l'imposer. `$3xxxxx` : demande de confirmation (y/n).
+- Relecture de vérification (sauf `$3xxxxx`) : « read back differs » en cas d'écart.
+- Rafraîchit le moniteur et, si l'écriture touche le code affiché, le désassemblage.
+
+#### T14 — Édition au curseur dans le moniteur · Sonnet · dépendances : T13
+- TUI, moniteur affiché : `e` entre en mode édition modal. Curseur (vidéo inverse) sur un octet
+  ou un mot selon `w` ; flèches, défilement aux bords, PgUp/PgDn. Chiffres hexa : valeur en
+  attente (autre couleur), écrite quand l'unité est complète ou sur Entrée, puis le curseur
+  avance ; Backspace corrige ; Échap annule la saisie, second Échap quitte le mode. Pas de
+  step/continue en mode édition. Octets écrits par l'utilisateur dans une couleur distincte,
+  relecture différente en rouge. Tests hôte de la logique du curseur.
+
+#### G5 — Validation matérielle
+G5a (après T12) : modes A et B comme G1 (aucune régression). G5 (après T14) : écriture octet et mot
+en RAM `$100000`, sur la pile, en ROM (relecture différente), registre `$3xxxxx` avec
+confirmation ; édition au curseur dans les deux tailles avec défilement.
 
 ## Ordonnancement
 

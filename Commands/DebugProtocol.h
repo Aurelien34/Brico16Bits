@@ -12,9 +12,9 @@ constexpr uint32_t BIOS_PATCH_TRACE_ROUTINE_OFFSET = 0x4200;
 constexpr uint32_t BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES = 0x100;
 
 /// @brief Pico -> 68k mailbox. $1FFFA is reserved (BricoExt / CommandManager).
-/// @brief long: address (READ_MEM) / target PC (RUN_UNTIL).
+/// @brief long: address (READ_MEM, WRITE_MEM) / target PC (RUN_UNTIL).
 constexpr uint32_t DEBUG_MAILBOX_ARG0 = 0x1FFF0;
-/// @brief long: word count (READ_MEM) / minimum SP (RUN_UNTIL).
+/// @brief long: word count (READ_MEM) / minimum SP (RUN_UNTIL) / value (WRITE_MEM: bits 0-15, bit 31 = word size).
 constexpr uint32_t DEBUG_MAILBOX_ARG1 = 0x1FFF4;
 /// @brief word: non-zero = stop at the next passage in the handler.
 constexpr uint32_t DEBUG_MAILBOX_BREAK = 0x1FFF8;
@@ -30,8 +30,12 @@ enum class DebugCommand : uint16_t
     Continue = 1,  ///< Clear T in the stacked SR, rte
     GetRegs = 2,   ///< Send the registers response + EOT, stay in the loop
     ReadMem = 3,   ///< ARG0 = address (even), ARG1 = word count (1..256)
-    RunUntil = 4   ///< ARG0 = target PC, ARG1 = minimum SP; rte with T set
+    RunUntil = 4,  ///< ARG0 = target PC, ARG1 = minimum SP; rte with T set
+    WriteMem = 5   ///< ARG0 = address, ARG1 = value (bits 0-15) | DEBUG_WRITE_MEM_WORD; answer: EOT only
 };
+
+/// @brief WRITE_MEM: bit 31 of ARG1 selects a word write (move.w, even address only); 0 = byte write (move.b).
+constexpr uint32_t DEBUG_WRITE_MEM_WORD = 0x80000000u;
 
 constexpr uint16_t DEBUG_PROTOCOL_MAGIC = 0xDB02;
 

@@ -43,7 +43,7 @@ typedef bool (*PollCallback)(void *context);
 /// @brief Pico side of the debugger v2 protocol (no user interface).
 /// Instance class: it holds state (request counter, timeout, error, statistics).
 /// ResetMailbox() is static as it is used before any link exists (before the 68k reset).
-/// Usage : ResetMailbox(), reset the 68k, then WaitStop() / GetRegisters() / ReadMemory() / Resume().
+/// Usage : ResetMailbox(), reset the 68k, then WaitStop() / GetRegisters() / ReadMemory() / WriteMemory() / Resume().
 class DebugLink
 {
 public:
@@ -71,6 +71,20 @@ public:
     /// true, any range overlapping $300000-$3FFFFF or containing a word of $C00000-$CFFFFF whose
     /// (addr & 0x1FFFE) is 0x1FF00 / 0x1FF02 (BricoExt EOT / port out, watcher compares A1-A16 only).
     bool ReadMemory(uint32_t address, uint16_t words, uint16_t *buffer, bool force = false);
+
+    /// @brief WRITE_MEM request: writes one byte (word == false, low 8 bits of value) or one word.
+    /// Refused (error InvalidArgument, nothing sent) when:
+    /// - address > $FFFFFF (68000 24 bits bus: an alias would bypass the checks below);
+    /// - word write at an odd address (address error in the handler);
+    /// - the written word of $C00000-$CFFFFF has (addr & 0x1FFFE) == 0x1FF00 / 0x1FF02 (BricoExt EOT /
+    ///   port out and their mirrors, same rule as ReadMemory), even with force;
+    /// - the written bytes overlap $300000-$3FFFFF, unless force is true;
+    /// - the written bytes overlap the handler's stack [SSP - 66, SSP), SSP = SSP_INTERRUPTED: exception
+    ///   frame (SR, PC) and the 15 registers saved by the handler, restored by rte / movem on resume.
+    ///   Even with force. SSP is the one of the last GetRegisters() of the current stop; if there was
+    ///   none since the last WaitStop(), a GET_REGS request is sent first to learn it.
+    /// The 68k acknowledges with an EOT only (same timeout / error handling as the other requests).
+    bool WriteMemory(uint32_t address, uint16_t value, bool word, bool force = false);
 
     /// @brief Resume execution : Step, Continue or RunUntil (arg0 = target PC, arg1 = minimum SP).
     /// Other commands set error InvalidArgument and send nothing. Then call WaitStop().
@@ -112,4 +126,6 @@ private:
     uint32_t mnUnrecognizedFrames;
     uint32_t mnLastUnrecognizedWords;
     uint32_t mnLastExtraWords;
+    uint32_t mnStopSsp;       ///< SSP_INTERRUPTED of the current stop (valid if mbStopSspValid)
+    bool mbStopSspValid;      ///< mnStopSsp comes from a GET_REGS of the current stop
 };
