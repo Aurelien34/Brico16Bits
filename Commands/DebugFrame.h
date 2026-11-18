@@ -4,7 +4,7 @@
 
 #include "InstructionFlow.h"
 
-#define DEBUG_FRAME_CODE_WORDS 25
+#define DEBUG_FRAME_CODE_WORDS 50      // Capacity: code words read at PC at each stop (one READ_MEM)
 #define DEBUG_INSTRUCTION_MAX_WORDS 5   // Longest 68000 instruction: opcode + 4 extension words
 #define DEBUG_INSTRUCTION_MAX_TEXT 100
 
@@ -18,6 +18,7 @@ struct DebugFrame
     uint16_t sr;
     uint32_t pc;
     uint16_t code[DEBUG_FRAME_CODE_WORDS];  // Memory starting at PC
+    uint16_t codeWords;                     // Number of valid words in code[] (fewer if the read was refused)
     uint16_t frameNumber;
 };
 

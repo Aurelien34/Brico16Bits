@@ -3,6 +3,7 @@
 #include "Command.h"
 #include "DebugTuiView.h"
 #include "DebugLink.h"
+#include "CallStack.h"
 
 class CommandDebug : public Command
 {
@@ -19,6 +20,7 @@ private:
         None,
         Step,
         StepOver,       // 'o' / F10
+        StepOut,        // 'u'
         RunTo,          // 'g': run to an address
         Break,          // 'b': request a break while running
         Continue,
@@ -59,7 +61,8 @@ private:
     struct StopInfo
     {
         ResumeKind kind = ResumeKind::None;
-        bool bStepOver = false;         ///< kind == RunUntil: it was a step over (not a 'g')
+        bool bStepOver = false;         ///< kind == RunUntil: it was a step over or a step out (not a 'g')
+        bool bStepOut = false;          ///< kind == RunUntil && bStepOver: it was a step out (history is not fed)
         uint32_t runUntilTarget = 0;    ///< kind == RunUntil: PC argument
         uint32_t runUntilMinSp = 0;     ///< kind == RunUntil: minimum SP argument (the 68k compares SSP before the exception)
         /// kind == RunUntil: stopped on the target (PC == target and SSP >= minimum SP). false: break, or another
@@ -71,6 +74,13 @@ private:
     /// @brief Instructions executed before the current stop (see ExecutionHistory). Cleared at the start of Dbg, after
     /// CONTINUE and on any DebugLink error. T8 / T10: GetPrevious() gives the previous PC, SP (effective a7) and size.
     ExecutionHistory mHistory;
+
+    /// @brief Call stack analyzer (shadow stack kept across stops, T10). One instance, reset at the start of Dbg.
+    CallStack mCallStack;
+    /// @brief Callers of the current stop (innermost first), as displayed and used by step out
+    Caller mCallers[DEBUG_CALLERS_MAX_LINES];
+    int mCallerCount = 0;
+    CallersStatus mCallersStatus = CallersStatus::Unknown;
     void ShowSplitter();
     void RepeatChars(char c, int16_t count);
 };

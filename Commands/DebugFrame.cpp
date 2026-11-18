@@ -9,12 +9,13 @@ int DisassembleFrame(const DebugFrame *frame, DisassembledInstruction *instructi
 {
     // Copy the code with some zero padding: the decoder may read past the words sent by the 68k for the last instruction
     uint16_t code[DEBUG_FRAME_CODE_WORDS + 16] = {0};
-    memcpy(code, frame->code, sizeof(frame->code));
+    int codeWords = frame->codeWords < DEBUG_FRAME_CODE_WORDS ? frame->codeWords : DEBUG_FRAME_CODE_WORDS;
+    memcpy(code, frame->code, codeWords * sizeof(uint16_t));
 
     int count = 0;
     int position = 0;
     uint32_t address = frame->pc;
-    while (count < maxInstructions && position < DEBUG_FRAME_CODE_WORDS)
+    while (count < maxInstructions && position < codeWords)
     {
         DisassembledInstruction *instruction = &instructions[count++];
         int start = position;
@@ -29,9 +30,9 @@ int DisassembleFrame(const DebugFrame *frame, DisassembledInstruction *instructi
         }
 
         instruction->address = address;
-        instruction->truncated = position > DEBUG_FRAME_CODE_WORDS;
+        instruction->truncated = position > codeWords;
         instruction->wordCount = 0;
-        for (int w = start; w < position && w < DEBUG_FRAME_CODE_WORDS && instruction->wordCount < DEBUG_INSTRUCTION_MAX_WORDS; ++w)
+        for (int w = start; w < position && w < codeWords && instruction->wordCount < DEBUG_INSTRUCTION_MAX_WORDS; ++w)
         {
             instruction->words[instruction->wordCount++] = code[w];
         }

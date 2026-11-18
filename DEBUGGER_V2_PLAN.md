@@ -317,7 +317,7 @@ bascule F3 ; dump d'une adresse cartouche.
     remplacent des lignes de la fin du listing). Vue classique : 1 ou 2 lignes en plus, avant `->`.
 - Historique vidé après CONTINUE, au lancement de `Dbg`, et sur toute erreur de `DebugLink`.
   (T8 ajoutera : vidé après `g` et break ; après un step over arrêté sur sa cible, l'instruction
-  sautée — le `jsr`/`bsr`/`trap`/`dbcc` — devient l'instruction précédente, marquée comme rupture.)
+  sautée — le `jsr`/`bsr`/`trap`/`dbcc` — devient l'instruction précédente. Décision utilisateur pendant G4 : affichée comme ligne contiguë normale, sans `<-`, réservé aux vraies ruptures d'adresse.)
 - Exposer l'historique de façon réutilisable par T8 (taille de l'instruction précédente, PC et SP
   précédents pour `CallStack::OnStep`).
 - Fichiers : `CommandDebug.*`, `DebugTuiView.*`.
@@ -390,6 +390,11 @@ Step over d'un `jsr` dans Brico68k et dans un jeu ; break sur une boucle d'atten
 - Panneau TUI (3 à 5 lignes : adresse + méthode), intégré à `ComputeLayout()`. En vue classique,
   une ligne `Caller: $xxxxxx (shadow|a6|scan)`.
 - `F11` / `u` (step out) : `RUN_UNTIL(callers[0].returnAddress, callers[0].frameSp + 4)`.
+  - **Révisé pendant G4** (demandes de l'utilisateur) : step out sur `u` seulement ; `F11` = step
+    into (pas normal, convention Visual Studio). Shift+F11 a été essayé puis retiré (Tera Term
+    n'envoie pas le modificateur). Après un step out arrêté sur sa cible, l'historique contient
+    seulement l'instruction où le step out a été lancé, affichée `<- out of c184f6  ...` (le `rts`
+    réellement exécuté n'est pas connu du Pico). Pas de ligne équivalente après `g` ou un break.
 - Tenue de la pile fantôme (`CallStack`, instance unique dans `CommandDebug`) :
   - `Reset()` au lancement de `Dbg` et à chaque reset du 68k.
   - Après un STEP : `OnStep(prevPc, prevSp, ClassifyInstruction(...), taille, newPc, newSp)`, avec
@@ -476,7 +481,7 @@ trompe trop souvent.
 - **Côté Pico** : `F11` / `u` enverrait cette commande au lieu de
   `RUN_UNTIL(callers[0].returnAddress, frameSp + 4)` ; même touche, même affichage. Le panneau
   « Callers » reste, à titre informatif. Après l'arrêt : `CallStack::OnRunUntilReached(newSp)`
-  (le cadre courant a été dépilé), historique avec `forceBreak=true` (ligne `<-` sur le `rts`).
+  (le cadre courant a été dépilé), historique vidé (comme le step out de T10).
 - **Variante sans toucher au 68k** : enchaîner des STEP côté Pico jusqu'à exécuter un `rts` au
   bon niveau de SP. Exact aussi, mais un aller-retour par instruction : acceptable pour une
   fonction courte, inutilisable avec une boucle.
@@ -502,3 +507,15 @@ code transmis sont corrects.
   désassemblage. Les instructions Call/Trap/Loop concernées (`JSR`, `BSR`, `TRAP`, `DBcc`) sont
   décodées ; `TRAPV` ne l'est pas, mais il fait un mot, ce qui correspond à l'avance d'un
   `Unknown`.
+- **Corrigé** (avec accord de l'utilisateur, en parallèle de T10) : `MOVE to SR`, `ORI`/`ANDI`/
+  `EORI to SR`, `MOVE USP`, `STOP`, `RESET` ajoutés (`TRAPV` était en fait déjà décodé) ;
+  `move ...,sr/ccr` refuse le mode An. Bug trouvé au passage : le masque de `Nop` valait
+  `0b0100111001110001` au lieu de `$FFFF`, si bien que des opcodes comme `6E71` (`bgt`) étaient
+  affichés `nop` ; corrigé. Tests hôte : `HostTests/TestOpcodeDecoder.cpp`.
+- Restent ouverts :
+  - styles différents : variantes SR `ori #$8000,sr`, variantes CCR existantes `ori #10,CCR`
+    (sans `$`, CCR en majuscules) ;
+  - `OpcodeDecoder.cpp` (`Opcode_Tool_BitChange`) : bug de précédence
+    `(x>>9) & 0b111 != 0b100` (signalé par `-Wparentheses`, comme une autre ligne vers 202) ;
+  - le cas particulier `TRAPV` de `CommandDebug.cpp` (taille fiable malgré `Unknown`) est
+    devenu inutile, sans être faux.

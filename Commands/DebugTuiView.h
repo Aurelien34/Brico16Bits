@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "CallStack.h"
 #include "DebugFrame.h"
 #include "MemoryDump.h"
 
@@ -11,7 +12,7 @@ struct ExecutedInstruction
 {
     DisassembledInstruction instruction;    ///< PC, text and words as disassembled at the stop where it was about to run
     uint32_t sp;                            ///< Effective a7 at that stop (before the instruction ran)
-    bool forceBreak;                        ///< The flow is considered broken after it, even if the next PC is contiguous
+    bool stepOutOrigin;                     ///< Instruction where a step out started: shown as a "<- out of" line (flow break)
 
     /// @brief Size in bytes (wordCount * 2). Only meaningful if IsSizeReliable().
     uint32_t GetSizeBytes() const { return (uint32_t)instruction.wordCount * 2; }
@@ -39,8 +40,9 @@ public:
     void Clear() { mnCount = 0; }
     /// @brief Record an executed instruction (the most recent one). The oldest is dropped when full.
     /// @param sp Effective a7 when it was about to run
-    /// @param forceBreak true to display it as a "from" line even if the next PC is contiguous (T8: step over)
-    void Push(const DisassembledInstruction &instruction, uint32_t sp, bool forceBreak = false);
+    /// @param stepOutOrigin true for the instruction where a step out started (shown as a "<- out of" line). After a step
+    /// over, the skipped call is shown as a normal contiguous line)
+    void Push(const DisassembledInstruction &instruction, uint32_t sp, bool stepOutOrigin = false);
     int GetCount() const { return mnCount; }
     /// @brief Entry by age: 0 = oldest, GetCount() - 1 = most recent (the instruction executed just before the current stop)
     const ExecutedInstruction &Get(int index) const { return maEntries[index]; }
@@ -49,7 +51,7 @@ public:
     /// @brief Lines to display above the instruction at currentPc (oldest first):
     /// - most recent entry contiguous with currentPc: it is shown as a normal line, preceded by the older entry if that
     ///   one is contiguous with it too (an older entry that is not contiguous is dropped, no marker);
-    /// - flow break (or unreliable size, or forceBreak): only the most recent entry, as a "from" line.
+    /// - flow break (or unreliable size, or step out origin): only the most recent entry, as a "from" line.
     /// @param rows Array of MAX_ROWS rows
     /// @return Number of rows written
     int BuildRows(uint32_t currentPc, HistoryRow *rows) const;
@@ -57,6 +59,17 @@ public:
 private:
     ExecutedInstruction maEntries[MAX_ENTRIES];
     int mnCount = 0;
+};
+
+/// @brief Maximum number of caller lines displayed by the full screen view (the "Callers" panel has 3 to 5 of them)
+#define DEBUG_CALLERS_MAX_LINES 5
+
+/// @brief Result of the call stack analysis at the current stop, as displayed
+enum class CallersStatus : uint8_t
+{
+    Unknown,    ///< Not analyzed at this stop (panel hidden, or not computed yet)
+    Ok,         ///< Analyzed: count callers (possibly 0 = none found)
+    Error       ///< A DebugLink error prevented the analysis
 };
 
 /// @brief Full screen (TUI) display of the 68000 debugger
@@ -85,6 +98,13 @@ public:
     void PollAsyncMessages();
     /// @brief Prompt in the message line and read a line (see Tui::ReadLine). Message line cleared afterwards.
     bool PromptInput(const char *prompt, char *buffer, size_t size, void (*idle)());
+
+    /// @brief Number of callers the view can display: 3 to 5 if the "Callers" panel fits, else 1 (a single "Caller"
+    /// line in the Status box), 0 if the view is not active or the terminal is too small.
+    int GetCallerLines() const;
+    /// @brief Callers found at the current stop (copied, at most DEBUG_CALLERS_MAX_LINES). Panel and status line
+    /// redrawn if bDraw.
+    void SetCallers(const Caller *callers, int count, CallersStatus status, bool bDraw = true);
 
     /// @brief Number of memory lines (16 bytes each) to read for the memory panel: 0 if the panel is not displayed.
     /// Only meaningful once the view is entered (the layout depends on the terminal size).
@@ -115,6 +135,8 @@ private:
     void DrawStatus();
     void DrawCode();
     void DrawMemory();
+    void DrawCallers();
+    void DrawCallerStatusLine();
     void DrawMessage();
     void DrawHelp();
     void DrawTooSmall();
@@ -137,6 +159,11 @@ private:
     uint32_t mnMemoryAddress = 0;
     char mszMemoryError[96] = "";
 
+    // Callers (call stack) at the current stop
+    Caller maCallers[DEBUG_CALLERS_MAX_LINES];
+    int mnCallerCount = 0;
+    CallersStatus meCallersStatus = CallersStatus::Unknown;
+
     // Layout, computed from the terminal size by ComputeLayout()
     uint16_t mnScreenWidth = 80;
     uint16_t mnScreenHeight = 24;
@@ -153,6 +180,9 @@ private:
     bool mbBothPanels = false;
     bool mbShowCode = true;
     bool mbShowMemory = false;
+    uint16_t mnRowCallers = 0;
+    uint16_t mnHeightCallers = 0;       // 0: no Callers panel
+    int mnCallerLines = 0;
     uint16_t mnRowMessage = 23;
     uint16_t mnRowHelp = 24;
 };

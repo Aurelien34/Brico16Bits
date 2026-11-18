@@ -15,7 +15,10 @@
 #define CODE_MAX_LINES      DEBUG_FRAME_CODE_WORDS     // At most one instruction per code word
 #define MEMORY_MAX_LINES    (MEMORY_DUMP_MAX_BYTES / 16)
 #define MEMORY_BYTES_PER_LINE 16
-#define BOTH_PANELS_MIN_ROWS 32                         // From this height, code and memory are displayed together
+#define CALLERS_MIN_LINES   3                           // "Callers" panel: 3 to DEBUG_CALLERS_MAX_LINES lines
+#define MAIN_MIN_ROWS       10                          // Program or Memory alone keeps at least this height (80x24 layout)
+#define MAIN_BOTH_MIN_ROWS  12                          // Program + Memory together keep at least this height
+#define BOTH_PANELS_MIN_ROWS 32                        // From this height, code and memory are displayed together
 
 // Colors (xterm 256 colors palette)
 #define COLOR_BAR_FG        231
@@ -36,6 +39,7 @@
 #define COLOR_TARGET        179     // Branch target
 #define COLOR_TARGET_HISTORY 95     // Branch target on a history line
 #define COLOR_HISTORY       242     // Executed instructions above the current one (dimmed)
+#define HISTORY_PREFIX_STEP_OUT "<- out of "    // History line of the instruction where a step out started
 #define HISTORY_MIN_LISTING 3       // Lines of the listing (current instruction included) kept when history takes lines
 #define COLOR_CURRENT_BG    237
 #define COLOR_CURRENT_ARROW 46
@@ -52,14 +56,14 @@ bool ExecutedInstruction::IsSizeReliable() const
 
 bool ExecutedInstruction::IsContiguousTo(uint32_t nextPc) const
 {
-    if (forceBreak || !IsSizeReliable())
+    if (stepOutOrigin || !IsSizeReliable())
     {
         return false;
     }
     return ((instruction.address + GetSizeBytes()) & 0xffffff) == (nextPc & 0xffffff);
 }
 
-void ExecutionHistory::Push(const DisassembledInstruction &instruction, uint32_t sp, bool forceBreak)
+void ExecutionHistory::Push(const DisassembledInstruction &instruction, uint32_t sp, bool stepOutOrigin)
 {
     if (mnCount == MAX_ENTRIES)
     {
@@ -72,7 +76,7 @@ void ExecutionHistory::Push(const DisassembledInstruction &instruction, uint32_t
     ExecutedInstruction &entry = maEntries[mnCount++];
     entry.instruction = instruction;
     entry.sp = sp;
-    entry.forceBreak = forceBreak;
+    entry.stepOutOrigin = stepOutOrigin;
 }
 
 int ExecutionHistory::BuildRows(uint32_t currentPc, HistoryRow *rows) const
@@ -187,6 +191,23 @@ void DebugTuiView::ComputeLayout()
         available = 0;
     }
     mbBothPanels = mnScreenHeight >= BOTH_PANELS_MIN_ROWS;
+
+    // "Callers" panel at the bottom, only if Program / Memory keep their minimum height (so never at 80x24: a one
+    // line "Caller" in the Status box is used instead). It takes 3 to 5 lines, borders excluded.
+    int callerLines = available - ((mbHasMemoryAddress && mbBothPanels) ? MAIN_BOTH_MIN_ROWS : MAIN_MIN_ROWS) - 2;
+    if (callerLines < CALLERS_MIN_LINES)
+    {
+        callerLines = 0;
+    }
+    if (callerLines > DEBUG_CALLERS_MAX_LINES)
+    {
+        callerLines = DEBUG_CALLERS_MAX_LINES;
+    }
+    mnCallerLines = callerLines;
+    mnHeightCallers = callerLines > 0 ? callerLines + 2 : 0;
+    available -= mnHeightCallers;
+    mnRowCallers = mnRowMessage - mnHeightCallers;
+
     // The memory panel only exists while the monitor is enabled (an address has been chosen)
     mbShowMemory = mbHasMemoryAddress && (mbBothPanels || mbMemorySelected);
     mbShowCode = !mbShowMemory || mbBothPanels;
@@ -218,6 +239,39 @@ void DebugTuiView::ComputeLayout()
     if (mnMemoryLines > MEMORY_MAX_LINES)
     {
         mnMemoryLines = MEMORY_MAX_LINES;
+    }
+}
+
+int DebugTuiView::GetCallerLines() const
+{
+    if (!Tui::IsActive() || !Tui::IsLargeEnough())
+    {
+        return 0;
+    }
+    return mnCallerLines > 0 ? mnCallerLines : 1;
+}
+
+void DebugTuiView::SetCallers(const Caller *callers, int count, CallersStatus status, bool bDraw)
+{
+    if (callers == nullptr || count < 0)
+    {
+        count = 0;
+    }
+    if (count > DEBUG_CALLERS_MAX_LINES)
+    {
+        count = DEBUG_CALLERS_MAX_LINES;
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        maCallers[i] = callers[i];
+    }
+    mnCallerCount = count;
+    meCallersStatus = status;
+    if (bDraw && Tui::IsActive() && Tui::IsLargeEnough())
+    {
+        DrawCallers();
+        DrawCallerStatusLine();
+        Tui::Flush();
     }
 }
 
@@ -289,6 +343,7 @@ void DebugTuiView::DrawAll()
         DrawStatus();
         DrawCode();
         DrawMemory();
+        DrawCallers();
         DrawMessage();
         DrawHelp();
     }
@@ -407,6 +462,10 @@ void DebugTuiView::DrawStatic()
     if (mbShowMemory)
     {
         Tui::Box(mnRowMemory, 1, mnHeightMemory, mnScreenWidth, "Memory");
+    }
+    if (mnCallerLines > 0)
+    {
+        Tui::Box(mnRowCallers, 1, mnHeightCallers, mnScreenWidth, "Callers");
     }
 
     // Fixed labels
@@ -559,6 +618,87 @@ void DebugTuiView::DrawStatus()
         Tui::RepeatChar(' ', mnWidthStatus - 4);
     }
     Tui::ResetAttributes();
+    DrawCallerStatusLine();
+}
+
+static const char *GetMethodName(CallerMethod method)
+{
+    switch (method)
+    {
+    case CallerMethod::Shadow:
+        return "shadow";
+    case CallerMethod::A6:
+        return "a6";
+    default:
+        return "scan";
+    }
+}
+
+/// @brief Without room for the "Callers" panel: innermost caller on the last row of the Status box
+void DebugTuiView::DrawCallerStatusLine()
+{
+    if (mnCallerLines > 0)
+    {
+        return;
+    }
+    char text[40];
+    uint8_t color = COLOR_VALUE;
+    if (meCallersStatus == CallersStatus::Ok && mnCallerCount > 0)
+    {
+        snprintf(text, sizeof(text), "Caller $%06lx (%s)", (unsigned long)(maCallers[0].returnAddress & 0xffffff), GetMethodName(maCallers[0].method));
+    }
+    else if (meCallersStatus == CallersStatus::Ok)
+    {
+        snprintf(text, sizeof(text), "Caller: none found");
+        color = COLOR_VALUE_UNKNOWN;
+    }
+    else
+    {
+        snprintf(text, sizeof(text), "Caller: ?");
+        color = meCallersStatus == CallersStatus::Error ? COLOR_ERROR : COLOR_VALUE_UNKNOWN;
+    }
+    Tui::MoveTo(ROW_BOXES + 8, mnColStatus + 3);
+    Tui::SetForeground(color);
+    Tui::Print("%-*.*s", (int)mnWidthStatus - 4, (int)mnWidthStatus - 4, text);
+    Tui::ResetAttributes();
+}
+
+/// @brief "Callers" panel: one line per caller (innermost first): address, method, stack slot holding the address
+void DebugTuiView::DrawCallers()
+{
+    if (mnCallerLines <= 0)
+    {
+        return;
+    }
+    const int innerWidth = mnScreenWidth - 2;
+    for (int line = 0; line < mnCallerLines; ++line)
+    {
+        uint16_t row = mnRowCallers + 1 + line;
+        Tui::ResetAttributes();
+        Tui::FillLine(row, 2, innerWidth);
+        Tui::MoveTo(row, 3);
+        if (meCallersStatus == CallersStatus::Ok && line < mnCallerCount)
+        {
+            const Caller &caller = maCallers[line];
+            Tui::SetForeground(COLOR_LABEL);
+            Tui::Print("#%d  ", line);
+            Tui::SetForeground(COLOR_CODE_ADDRESS);
+            Tui::Print("$%06lx  ", (unsigned long)(caller.returnAddress & 0xffffff));
+            Tui::SetForeground(COLOR_VALUE);
+            Tui::SetBold(caller.method == CallerMethod::Shadow);
+            Tui::Print("%-6s", GetMethodName(caller.method));
+            Tui::SetBold(false);
+            Tui::SetForeground(COLOR_CODE_HEX);
+            Tui::Print("  stack $%06lx", (unsigned long)(caller.frameSp & 0xffffff));
+        }
+        else if (line == 0)
+        {
+            bool error = meCallersStatus == CallersStatus::Error;
+            Tui::SetForeground(error ? COLOR_ERROR : COLOR_VALUE_UNKNOWN);
+            Tui::Print("%s", error ? "? memory read failed" : (meCallersStatus == CallersStatus::Ok ? "No caller found" : "?"));
+        }
+    }
+    Tui::ResetAttributes();
 }
 
 void DebugTuiView::DrawCode()
@@ -625,9 +765,13 @@ void DebugTuiView::DrawCode()
             Tui::SetForeground(COLOR_HISTORY);
             const HistoryRow &historyRow = pHistory[line];
             const DisassembledInstruction *past = &historyRow.pInstruction->instruction;
-            Tui::Print("%s", historyRow.isFromLine ? "<- " : "   ");
+            // Step out origin: "<- out of " is longer than "<- ", the text field is shortened so the words stay aligned
+            bool bStepOutOrigin = historyRow.isFromLine && historyRow.pInstruction->stepOutOrigin;
+            const char *prefix = bStepOutOrigin ? HISTORY_PREFIX_STEP_OUT : (historyRow.isFromLine ? "<- " : "   ");
+            int prefixExtra = (int)strlen(prefix) - 3;
+            Tui::Print("%s", prefix);
             Tui::Print("%06lx  ", (unsigned long)(past->address & 0xffffff));
-            PrintTextAndTarget(past, textWidth, COLOR_HISTORY, COLOR_TARGET_HISTORY, false);
+            PrintTextAndTarget(past, textWidth - prefixExtra, COLOR_HISTORY, COLOR_TARGET_HISTORY, false);
             Tui::SetForeground(COLOR_HISTORY);
             for (int w = 0; w < past->wordCount; ++w)
             {
@@ -753,8 +897,9 @@ void DebugTuiView::DrawHelp()
     {
         { "s", "Step", false },
         { "o", "Over", false },
+        { "u", "Out", false },
         { "c", "Cont", false },
-        { "g", "Goto", false },
+        { "g", "Go", false },
         { "m", "Mem", false },
         { "w", "8/16", true },
         { "PgUp/Dn", "Scr", true },

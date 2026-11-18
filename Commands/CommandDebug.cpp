@@ -26,7 +26,7 @@
 #define COMMAND_NAME "Dbg"
 
 #define COMMAND_DESC_PARAMETERS "[tui]"
-#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s step, o/F10 step over, c continue, g run to address, b break, m memory address (empty = off; hex, $hex, d0-d7, a0-a7, sp, pc, +/-hex), w 8/16-bit, PgUp/PgDn scroll, F3 code/mem, x exit"
+#define COMMAND_DESC_TEXT "68000 debug mode (needs trace mode + TRACE vector in the 68k code; 'tui' = full screen). Keys: s/F11 step, o/F10 step over, u step out, c continue, g run to addr, b break, m memory address (empty = off; hex, $hex, d0-a7, sp, pc, +/-hex), w 8/16-bit, PgUp/Dn scroll, F3 code/mem, x exit"
 static_assert(sizeof(COMMAND_DESC_TEXT) <= COMMAND_MAX_LENGTH_DESC_TEXT, "Command description too long");
 
 static_assert(TRACE_ROUTINE_SIZE_BYTES <= BIOS_PATCH_TRACE_ROUTINE_MAX_BYTES, "TRACE handler too big for the BIOS patch area");
@@ -223,6 +223,38 @@ static bool GetStepOverTarget(const DebugFrame *frame, uint32_t *pNext)
     return true;
 }
 
+/// @brief Work RAM range (the call stack analysis only reads the stack window inside it)
+#define CALLERS_WORK_RAM_START 0x100000u
+#define CALLERS_WORK_RAM_END   0x110000u    // First address after the work RAM
+
+/// @brief Context of the memory read callback given to CallStack::Analyze()
+struct CallerReadContext
+{
+    DebugLink *link;
+    bool bLinkError;    ///< A read failed for another reason than a refusal: no more reads are attempted
+};
+
+/// @brief CallStack read callback: every read goes through DebugLink::ReadMemory (never forced). A refusal
+/// ($300000-$3FFFFF, BricoExt ports: InvalidArgument) only rejects the candidate; any other error is a link error,
+/// after which the remaining reads of the analysis fail immediately (no timeout piling up).
+static bool ReadForCallStack(uint32_t address, uint16_t words, uint16_t *buffer, void *context)
+{
+    CallerReadContext *ctx = (CallerReadContext *)context;
+    if (ctx->bLinkError)
+    {
+        return false;
+    }
+    if (ctx->link->ReadMemory(address, words, buffer, false))
+    {
+        return true;
+    }
+    if (ctx->link->GetLastError() != DebugLinkError::InvalidArgument)
+    {
+        ctx->bLinkError = true;
+    }
+    return false;
+}
+
 void CommandDebug::GetCommandName(char *name) const
 {
     strncpy(name, COMMAND_NAME, COMMAND_MAX_LENGTH_NAME);
@@ -313,6 +345,9 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
 
     MemoryState memory;
     mHistory.Clear();
+    mCallStack.Reset();
+    mCallerCount = 0;
+    mCallersStatus = CallersStatus::Unknown;
     mStop = StopInfo();
     DebugTuiView view;
     view.SetHistory(&mHistory);
@@ -470,6 +505,63 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         }
     };
 
+    // Call stack analysis of the current stop (T10). Done only for what is displayed: the Callers panel (3 to 5 lines),
+    // the Status box line (1) or the classic "Caller:" line (1); it is repeated only if the view now needs more lines
+    // than were analyzed (resize, memory monitor on / off). The effective a7 is pFrame->a[7] (SSP in supervisor
+    // mode, which is the only mode of the Neo Geo: it is also what T8 compares with the 68k SSP). Reads: at most ONE
+    // READ_MEM for the stack window (none if the shadow stack alone fills the lines), plus the A6 links and code
+    // words checked by CallStack. A failed read never stops the debugger: "?" is shown and the shadow stack dropped.
+    int nCallersAnalyzedLines = -1;
+    auto analyzeCallers = [&](int lines)
+    {
+        if (lines <= 0 || lines <= nCallersAnalyzedLines)
+        {
+            return;
+        }
+        if (lines > DEBUG_CALLERS_MAX_LINES)
+        {
+            lines = DEBUG_CALLERS_MAX_LINES;
+        }
+        nCallersAnalyzedLines = lines;
+        uint32_t sp = pFrame->a[7];
+        CallerReadContext readContext = { &link, false };
+        uint16_t stackWords[CALLSTACK_SCAN_MAX_WORDS];
+        CallStackMemory callStackMemory;
+        callStackMemory.stackBase = sp;
+        callStackMemory.stackWords = stackWords;    // Always provided: Analyze() must not read the window a second time
+        callStackMemory.stackWordCount = 0;
+        callStackMemory.read = ReadForCallStack;
+        callStackMemory.context = &readContext;
+        if (mCallStack.GetShadowDepth() < lines && (sp & 1) == 0 && sp >= CALLERS_WORK_RAM_START && sp < CALLERS_WORK_RAM_END)
+        {
+            uint32_t words = (CALLERS_WORK_RAM_END - sp) >> 1;
+            if (words > CALLSTACK_SCAN_MAX_WORDS)
+            {
+                words = CALLSTACK_SCAN_MAX_WORDS;
+            }
+            if (ReadForCallStack(sp, (uint16_t)words, stackWords, &readContext))
+            {
+                callStackMemory.stackWordCount = (uint16_t)words;
+            }
+        }
+        mCallerCount = mCallStack.Analyze(sp, pFrame->a[6], callStackMemory, mCallers, lines);
+        if (readContext.bLinkError)
+        {
+            mCallStack.Invalidate();
+            mCallerCount = 0;
+            mCallersStatus = CallersStatus::Error;
+        }
+        else
+        {
+            mCallersStatus = CallersStatus::Ok;
+        }
+        view.SetCallers(mCallers, mCallerCount, mCallersStatus);
+    };
+    auto ensureCallers = [&]()
+    {
+        analyzeCallers(Tui::IsActive() ? view.GetCallerLines() : 1);
+    };
+
     while (true)
     {
         // Wait for a stop frame from the 68k...
@@ -479,6 +571,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         if (!link.WaitStop(&stop, PollWaiting, &waitContext))
         {
             mHistory.Clear();
+            mCallStack.Invalidate();
             // 'x' while a STEP / RUN_UNTIL is in progress: the 68k is still traced and would freeze in the handler at its
             // next stop. Ask for a break, wait for that stop and let it go untraced (CONTINUE). Not needed after
             // CONTINUE (T already 0) nor before the first frame (nothing resumed yet).
@@ -524,6 +617,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         if (!link.GetRegisters(&regs))
         {
             mHistory.Clear();
+            mCallStack.Invalidate();
             ReportLinkError(view, returnMessage, messageMaxSize, "Unable to read the registers", link);
             return false;
         }
@@ -537,31 +631,43 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         pFrame->sr = regs.sr;
         pFrame->pc = regs.pc;
         pFrame->frameNumber = ++nFrameNumber;
-        if (!link.ReadMemory(regs.pc, DEBUG_FRAME_CODE_WORDS, pFrame->code, false))
+        // Code at PC: the full buffer, or half of it if the read is refused (the end of the zone touches a forbidden
+        // area: I/O $3xxxxx, BricoExt ports), or nothing (PC itself in a forbidden area)
+        memset(pFrame->code, 0, sizeof(pFrame->code));
+        pFrame->codeWords = 0;
+        static const uint16_t codeReadSizes[] = { DEBUG_FRAME_CODE_WORDS, DEBUG_FRAME_CODE_WORDS / 2 };
+        for (uint16_t size : codeReadSizes)
         {
+            if (link.ReadMemory(regs.pc, size, pFrame->code, false))
+            {
+                pFrame->codeWords = size;
+                break;
+            }
             if (link.GetLastError() != DebugLinkError::InvalidArgument)
             {
                 mHistory.Clear();
+                mCallStack.Invalidate();
                 ReportLinkError(view, returnMessage, messageMaxSize, "Unable to read the code at PC", link);
                 return false;
             }
-            // Code not readable (e.g. PC in the $300000-$3FFFFF zone): display empty code
-            memset(pFrame->code, 0, sizeof(pFrame->code));
         }
         ++nStepCount;
 
         // How was this stop reached? For a RUN_UNTIL: on its target (PC == target and SSP >= minimum SP, the 68k
         // condition) or elsewhere (break, other breakpoint / trace event).
-        // T10 hook: here call CallStack::OnStep (kind Step), OnRunUntilReached(pFrame->a[7]) (kind RunUntil and
-        // bReachedTarget), Invalidate() (Continue, 'g', RunUntil not reached). The previous stop is pPreviousFrame.
         mStop.bReachedTarget = mStop.kind == ResumeKind::RunUntil && regs.pc == mStop.runUntilTarget && regs.ssp >= mStop.runUntilMinSp;
 
         // History: after a STEP, or a step over stopped on its target, the instruction executed is the first one of the
-        // previous stop (same words and text, no extra memory read): after a step over it is marked as a flow break so
-        // that the skipped jsr / bsr / dbcc is displayed as a "from" line. After anything else (first stop, continue,
+        // previous stop (same words and text, no extra memory read). After a step over, the skipped jsr / bsr / dbcc is
+        // contiguous with the current PC: it is displayed as a normal history line, not as a "from" line (user decision:
+        // "<-" is reserved for real address breaks). After anything else (first stop, continue,
         // 'g', break, RUN_UNTIL stopped elsewhere) there is no history.
-        bool bStepOverReached = mStop.kind == ResumeKind::RunUntil && mStop.bStepOver && mStop.bReachedTarget;
-        if ((mStop.kind != ResumeKind::Step && !bStepOverReached) || pPreviousFrame == nullptr)
+        // After a step out stopped on its target, the rts actually executed is unknown (the 68k ran without reporting):
+        // the history only holds the instruction where the step out started, shown as a "<- out of" line (user decision).
+        bool bStepOverReached = mStop.kind == ResumeKind::RunUntil && mStop.bStepOver && !mStop.bStepOut && mStop.bReachedTarget;
+        bool bStepOutReached = mStop.kind == ResumeKind::RunUntil && mStop.bStepOut && mStop.bReachedTarget;
+        const ExecutedInstruction *pExecuted = nullptr;     // Instruction executed by a STEP, for the call stack
+        if ((mStop.kind != ResumeKind::Step && !bStepOverReached && !bStepOutReached) || pPreviousFrame == nullptr)
         {
             mHistory.Clear();
         }
@@ -569,11 +675,54 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         {
             // Static: too large for the stack
             static DisassembledInstruction executed;
+            if (bStepOutReached)
+            {
+                mHistory.Clear();
+            }
             if (DisassembleFrame(pPreviousFrame, &executed, 1) == 1)
             {
-                mHistory.Push(executed, pPreviousFrame->a[7], bStepOverReached);
+                mHistory.Push(executed, pPreviousFrame->a[7], bStepOutReached);
+                if (mStop.kind == ResumeKind::Step)
+                {
+                    pExecuted = mHistory.GetPrevious();
+                }
             }
         }
+
+        // Call stack (T10): exactly one of OnStep / OnRunUntilReached / Invalidate per stop (see CallStack.h, "Validity")
+        if (mStop.kind == ResumeKind::Step)
+        {
+            bool bUpdated = false;
+            if (pExecuted != nullptr && pExecuted->instruction.wordCount >= 1)
+            {
+                InstructionFlow flow = ClassifyInstruction(pExecuted->instruction.words);
+                // The size only matters for a Call / Trap (return address); for the other flows only SP counts, so an
+                // undecoded instruction does not lose the shadow stack
+                if (pExecuted->IsSizeReliable() || (flow != InstructionFlow::Call && flow != InstructionFlow::Trap))
+                {
+                    uint8_t size = pExecuted->IsSizeReliable() ? (uint8_t)pExecuted->GetSizeBytes() : (uint8_t)2;
+                    mCallStack.OnStep(pExecuted->instruction.address, pExecuted->sp, flow, size, regs.pc, pFrame->a[7]);
+                    bUpdated = true;
+                }
+            }
+            if (!bUpdated)
+            {
+                mCallStack.Invalidate();
+            }
+        }
+        else if (mStop.kind == ResumeKind::RunUntil && mStop.bStepOver && mStop.bReachedTarget)
+        {
+            mCallStack.OnRunUntilReached(pFrame->a[7]);     // Step over or step out on its target
+        }
+        else if (mStop.kind != ResumeKind::None)
+        {
+            mCallStack.Invalidate();    // Continue, 'g', RUN_UNTIL stopped elsewhere (break)
+        }
+        mCallerCount = 0;
+        mCallersStatus = CallersStatus::Unknown;
+        nCallersAnalyzedLines = -1;
+        view.SetCallers(nullptr, 0, CallersStatus::Unknown, false);
+        ensureCallers();
 
         // Display the frame. The full screen view always keeps track of it (it only draws when active),
         // so that switching views at any time shows the current frame
@@ -594,9 +743,11 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         uint32_t runUntilTarget = 0;
         uint32_t runUntilMinSp = 0;
         bool bStepOver = false;
+        bool bStepOut = false;
         while (bWaiting)
         {
             ServiceBackgroundTasks(view);
+            ensureCallers();    // The layout may have changed (resize, memory monitor)
             Action action = ReadAction();
             switch (action)
             {
@@ -629,6 +780,28 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                     {
                         printf("> step\n");
                     }
+                }
+                bWaiting = false;
+                break;
+            }
+            case Action::StepOut:
+            {
+                ensureCallers();
+                analyzeCallers(1);
+                if (mCallersStatus != CallersStatus::Ok || mCallerCount < 1)
+                {
+                    showMessage(mCallersStatus == CallersStatus::Error ? "Step out impossible: memory read failed" : "No caller found", mCallersStatus == CallersStatus::Error);
+                    break;
+                }
+                // Run until the return address, with the stack back above the slot that holds it (frameSp + 4)
+                debugCommand = DebugCommand::RunUntil;
+                runUntilTarget = mCallers[0].returnAddress & 0xffffff;
+                runUntilMinSp = mCallers[0].frameSp + 4;
+                bStepOver = true;
+                bStepOut = true;
+                if (!Tui::IsActive())
+                {
+                    printf("> step out, running until $%06lx ('b' to break, 'x' to exit)...\n", (unsigned long)runUntilTarget);
                 }
                 bWaiting = false;
                 break;
@@ -696,6 +869,10 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
                 snprintf(returnMessage, messageMaxSize, "Debug interrupted");
                 return true;
             case Action::ToggleView:
+                if (Tui::IsActive())
+                {
+                    analyzeCallers(1);      // Going to the classic view: it prints the "Caller:" line
+                }
                 ToggleView(view, pFrame, true);
                 refreshMemory(false);
                 break;
@@ -762,6 +939,7 @@ bool CommandDebug::Execute(char *returnMessage, int messageMaxSize, const char *
         mStop.kind = debugCommand == DebugCommand::Step ? ResumeKind::Step :
             (debugCommand == DebugCommand::RunUntil ? ResumeKind::RunUntil : ResumeKind::Continue);
         mStop.bStepOver = bStepOver;
+        mStop.bStepOut = bStepOut;
         mStop.runUntilTarget = runUntilTarget;
         mStop.runUntilMinSp = runUntilMinSp;
         if (mStop.kind == ResumeKind::Continue || (mStop.kind == ResumeKind::RunUntil && !bStepOver))
@@ -875,6 +1053,9 @@ CommandDebug::Action CommandDebug::ReadAction()
         return Action::Continue;
     case Tui::Key::F10:
         return Action::StepOver;
+    case Tui::Key::F11:
+        // Visual Studio convention: F11 = step into (a plain step). Step out is 'u' only (Shift is not decoded)
+        return Action::Step;
     case Tui::Key::F2:
         return Action::ToggleView;
     case Tui::Key::F3:
@@ -898,6 +1079,8 @@ CommandDebug::Action CommandDebug::ReadAction()
             return Action::Step;
         case 'o': case 'O':
             return Action::StepOver;
+        case 'u': case 'U':
+            return Action::StepOut;
         case 'g': case 'G':
             return Action::RunTo;
         case 'b': case 'B':
@@ -1013,31 +1196,51 @@ void CommandDebug::ShowFrameClassic(const DebugFrame *frame)
     int historyCount = mHistory.BuildRows(frame->pc, historyRows);
     for (int i = 0; i < historyCount; ++i)
     {
-        PrintInstructionClassic(&historyRows[i].pInstruction->instruction, historyRows[i].isFromLine ? "| <- " : "|    ");
+        bool bStepOutOrigin = historyRows[i].isFromLine && historyRows[i].pInstruction->stepOutOrigin;
+        PrintInstructionClassic(&historyRows[i].pInstruction->instruction,
+                                bStepOutOrigin ? "| <- out of " : (historyRows[i].isFromLine ? "| <- " : "|    "));
     }
     for (int i = 0; i < count; ++i)
     {
         PrintInstructionClassic(&instructions[i], i == 0 ? "| -> " : "|    ");
     }
 
+    // Innermost caller (T10)
+    char callerText[40];
+    if (mCallersStatus == CallersStatus::Ok && mCallerCount > 0)
+    {
+        const char *method = mCallers[0].method == CallerMethod::Shadow ? "shadow" : (mCallers[0].method == CallerMethod::A6 ? "a6" : "scan");
+        snprintf(callerText, sizeof(callerText), "Caller: $%06lx (%s)", (unsigned long)(mCallers[0].returnAddress & 0xffffff), method);
+    }
+    else
+    {
+        snprintf(callerText, sizeof(callerText), "%s", mCallersStatus == CallersStatus::Ok ? "Caller: none found" : "Caller: ?");
+    }
+    printf("| %s", callerText);
+    RepeatChars(' ', CONSOLE_MAX_ROW_LENGTH - 3 - (int)strlen(callerText));
+    printf("|\n");
+
     ShowSplitter();
-    printf("\n's'/space step, 'o' step over, 'c' continue, 'g' run to address, 'm' memory dump (PgUp/PgDn scroll, 'w' 8/16-bit), 't' full screen view, 'x' exit\n");
+    printf("\n's'/space step, 'o' step over, 'u' step out, 'c' continue, 'g' run to address, 'm' memory dump (PgUp/PgDn scroll, 'w' 8/16-bit), 't' full screen view, 'x' exit\n");
 }
 
 void CommandDebug::PrintInstructionClassic(const DisassembledInstruction *instruction, const char *prefix)
 {
     // The branch target "($xxxxxx)" is appended to the text only if it fits in the text field, otherwise omitted
     char buffer[DEBUG_INSTRUCTION_MAX_TEXT + 16];
+    // A prefix longer than the usual 5 characters ("| <- out of ") shortens the text field: the borders stay aligned
+    int textWidth = CONSOLE_MAX_INSTRUCTIONS_LENGTH - ((int)strlen(prefix) - 5);
     const char *text = instruction->truncated ? "..." : instruction->text;
-    if (instruction->hasTarget && strlen(text) + 10 <= CONSOLE_MAX_INSTRUCTIONS_LENGTH)
+    if (instruction->hasTarget && (int)strlen(text) + 10 <= textWidth)
     {
         snprintf(buffer, sizeof(buffer), "%s ($%06lx)", text, (unsigned long)(instruction->target & 0xffffff));
         text = buffer;
     }
+    int length = (int)strlen(text) < textWidth ? (int)strlen(text) : textWidth;
     printf("%s", prefix);
     printf("%07lx: ", (unsigned long)instruction->address);
-    printf("%s ", text);
-    RepeatChars(' ', CONSOLE_MAX_INSTRUCTIONS_LENGTH - strlen(text));
+    printf("%.*s ", length, text);
+    RepeatChars(' ', textWidth - length);
     printf("| ");
 
     for (int w = 0; w < instruction->wordCount; ++w)
